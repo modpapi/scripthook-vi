@@ -11,8 +11,9 @@
 //                               the shipped scripts call draws a rect or text,
 //                               and none of the 31 uncalled handlers has that
 //                               shape (T1.6). The scripts' UI goes through
-//                               DATABINDING/UIAPPS. Text is copied; `font` is
-//                               ignored in v1; align is clamped to 0..2.
+//                               DATABINDING/UIAPPS. Text is copied; `font` picks
+//                               the overlay face (0 regular, 1 bold, 2 display;
+//                               others regular); align is clamped to 0..2.
 //
 // Control actions are atStringHash("INPUT_...") of the rage::InputType names
 // (par dump enum rage__InputType; the scripts pass e.g. INPUT_MOVE_LR =
@@ -55,11 +56,11 @@ inline void UiDrawRect(float x, float y, float w, float h, std::uint32_t rgba) {
 }
 
 // UI_DRAW_TEXT(utf8, x, y, scale, font, rgba, align). Null text is ignored.
-inline void UiDrawText(const char* utf8, float x, float y, float scale, std::int32_t /*font*/, std::uint32_t rgba,
+inline void UiDrawText(const char* utf8, float x, float y, float scale, std::int32_t font, std::uint32_t rgba,
                        std::int32_t align) {
     if (!utf8) return;
     int a = align < 0 ? 0 : align > 2 ? 2 : align;
-    overlay::GlobalDrawList().AddText(std::string_view(utf8), x, y, scale, rgba, a);
+    overlay::GlobalDrawList().AddText(std::string_view(utf8), x, y, scale, rgba, a, font);
 }
 
 }  // namespace shvi::gta6

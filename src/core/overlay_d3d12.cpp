@@ -80,6 +80,7 @@ struct Chain {
 
     // Dear ImGui
     ImGuiContext* imgui = nullptr;
+    ImFont* fonts[kFontCount] = {};  // regular, bold, display; null falls back to the regular face
     ID3D12DescriptorHeap* srvHeap = nullptr;
     UINT srvSize = 0;
     bool srvUsed[kSrvDescriptors] = {};
@@ -374,6 +375,25 @@ bool BuildOffscreen(Chain& c) {
 }
 
 // Builds the per-buffer state (and, the first time, ImGui) for desc d.
+// Menu faces from the system font folder: Segoe UI, Segoe UI Bold, Bahnschrift (a narrow display face for
+// titles). A missing file falls back to the built-in vector font, so text always draws. The SDK's
+// ui::TextWidth uses these faces' advance widths to fit labels into a panel.
+void LoadFonts(Chain& c, ImGuiIO& io) {
+    char dir[MAX_PATH] = {};
+    UINT n = GetWindowsDirectoryA(dir, MAX_PATH);
+    std::string fonts = (n > 0 && n < MAX_PATH) ? std::string(dir) + "\\Fonts\\" : std::string("C:\\Windows\\Fonts\\");
+    static const char* const kFiles[kFontCount] = {"segoeui.ttf", "segoeuib.ttf", "bahnschrift.ttf"};
+    for (int i = 0; i < kFontCount; ++i) {
+        std::string path = fonts + kFiles[i];
+        if (GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+        ImFontConfig cfg;
+        cfg.OversampleH = 2;
+        c.fonts[i] = io.Fonts->AddFontFromFileTTF(path.c_str(), 0.0f, &cfg);
+    }
+    if (!c.fonts[kFontRegular]) c.fonts[kFontRegular] = io.Fonts->AddFontDefaultVector();
+    SHVI_LOG("overlay: fonts %s / %s / %s", c.fonts[0] ? "regular" : "-", c.fonts[1] ? "bold" : "-", c.fonts[2] ? "display" : "-");
+}
+
 bool Build(Chain& c, const DXGI_SWAP_CHAIN_DESC1& d) {
     c.width = d.Width;
     c.height = d.Height;
@@ -404,7 +424,7 @@ bool Build(Chain& c, const DXGI_SWAP_CHAIN_DESC1& d) {
         ImGuiIO& io = ImGui::GetIO();
         io.IniFilename = nullptr;
         io.LogFilename = nullptr;
-        io.Fonts->AddFontDefaultVector();
+        LoadFonts(c, io);
         ImGui::SetCurrentContext(prev);
     }
     if (!c.srvHeap) {
@@ -445,9 +465,10 @@ ImU32 Col(std::uint32_t rgba) {
     return IM_COL32((rgba >> 24) & 0xFF, (rgba >> 16) & 0xFF, (rgba >> 8) & 0xFF, rgba & 0xFF);
 }
 
-void DrawItems(ImDrawList* dl, const Frame& frame, float W, float H) {
-    ImFont* font = ImGui::GetFont();
+void DrawItems(const Chain& c, ImDrawList* dl, const Frame& frame, float W, float H) {
+    ImFont* fallback = c.fonts[kFontRegular] ? c.fonts[kFontRegular] : ImGui::GetFont();
     for (const DrawItem& it : frame) {
+        ImFont* font = it.font >= 0 && it.font < kFontCount && c.fonts[it.font] ? c.fonts[it.font] : fallback;
         ImU32 col = Col(it.rgba);
         if (it.kind == DrawItem::Kind::Rect) {
             dl->AddRectFilled(ImVec2(it.x * W, it.y * H), ImVec2((it.x + it.w) * W, (it.y + it.h) * H), col);
@@ -589,7 +610,7 @@ void DrawFrame(void* p) {
         G->generationSeenAt = now;
     }
     const bool stale = now - G->generationSeenAt > kStaleFrameMs;
-    if (frame && !stale) DrawItems(dl, *frame, float(d.Width), float(d.Height));
+    if (frame && !stale) DrawItems(c, dl, *frame, float(d.Width), float(d.Height));
     if (G->testPattern) dl->AddRectFilled(ImVec2(8, 8), ImVec2(72, 40), IM_COL32(255, 0, 255, 255));
     ImGui::Render();
     ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), c.list);

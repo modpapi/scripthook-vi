@@ -48,7 +48,7 @@ struct DrawCmd {
     Color color{};
     std::string text;
     float scale = 0.35f;
-    int font = 4;
+    int font = 0;
     Align align = Align::Left;
 };
 using DrawList = std::vector<DrawCmd>;
@@ -63,25 +63,79 @@ inline void Submit(Backend& b, const DrawList& list) {
     for (const auto& c : list) b.Draw(c);
 }
 
-struct Style {
-    float x = 0.70f, y = 0.10f, width = 0.24f;
-    float headerHeight = 0.060f, itemHeight = 0.034f, footerHeight = 0.030f;
-    float padX = 0.008f;
-    float textYOffset = 0.10f;  // fraction of a row's height above the text line
-    int maxVisible = 10;
-    int font = 4;
-    float titleScale = 0.70f, itemScale = 0.34f;
-    Color header{20, 90, 160, 235}, background{0, 0, 0, 170}, highlight{235, 235, 235, 235};
-    Color footer{0, 0, 0, 220};
-    Color text{235, 235, 235, 255}, textSelected{10, 10, 10, 255}, title{255, 255, 255, 255};
+// Faces the GTA VI overlay draws with (UI_DRAW_TEXT's font argument): Segoe UI, Segoe UI Bold,
+// Bahnschrift. Any other value draws with the regular face.
+namespace font {
+inline constexpr int Regular = 0, Bold = 1, Display = 2;
+}
+
+// Text width without a renderer: advance widths of printable ASCII for the three faces, in thousandths of
+// the face's line height (the unit the overlay sizes text by). Other bytes count as an average glyph.
+namespace detail {
+inline constexpr std::uint16_t kAdvance[3][95] = {
+    {206,214,295,444,405,615,602,173,227,227,314,514,163,301,163,293,405,405,405,405,405,405,405,405,405,405,163,163,514,514,514,337,718,485,431,465,527,380,367,516,534,200,268,436,354,675,562,567,421,567,450,399,394,517,467,702,443,416,429,227,285,227,514,312,202,383,442,347,443,393,235,443,425,182,182,374,182,648,425,441,442,443,261,319,255,425,360,543,345,364,340,227,180,227,514},
+    {207,246,371,445,432,652,639,220,278,278,342,532,204,304,204,333,432,432,432,432,432,432,432,432,432,432,204,204,532,532,532,329,717,529,482,469,554,400,391,535,576,238,335,488,384,720,594,570,462,570,491,421,441,544,501,756,493,456,456,278,328,278,532,312,236,405,466,361,465,407,288,465,453,214,214,420,214,689,455,460,466,465,299,331,293,455,407,599,415,405,360,278,245,278,532},
+    {269,271,378,624,577,687,652,178,339,339,430,528,227,479,227,378,552,333,517,529,569,544,513,503,562,513,227,227,424,459,429,432,890,647,646,619,656,598,559,646,679,275,505,642,573,779,700,646,623,657,652,616,481,655,587,847,567,503,544,294,378,294,503,436,294,532,544,498,539,536,317,539,559,251,268,529,290,856,559,545,544,539,427,519,326,556,500,773,517,483,495,360,275,360,514},
 };
+}  // namespace detail
+
+struct Style {
+    float x = 0.715f, y = 0.085f, width = 0.255f;
+    float headerHeight = 0.068f, subHeight = 0.030f, itemHeight = 0.033f, footerHeight = 0.032f;
+    float accentHeight = 0.004f;  // the stripe under the header
+    float padX = 0.009f;
+    int maxVisible = 12;
+    int font = font::Regular, boldFont = font::Bold, titleFont = font::Display;
+    float titleScale = 0.62f, subScale = 0.25f, itemScale = 0.31f, tagScale = 0.20f, hintScale = 0.24f;
+    // How the backend sizes text and the screen's shape, for fitting labels: a line of `scale` is
+    // scale * textHeight of the screen height tall (the overlay's kTextScale), and `aspect` is width / height.
+    float textHeight = 0.06f, aspect = 16.0f / 9.0f;
+    std::string rootCaption = "MAIN MENU";  // the sub-header on the root page (deeper pages show the path)
+    Color accent{236, 72, 153, 255};
+    Color header{14, 14, 20, 240}, sub{0, 0, 0, 225}, background{8, 8, 12, 200}, highlight{236, 72, 153, 235};
+    Color section{0, 0, 0, 215}, footer{0, 0, 0, 230}, scrollTrack{255, 255, 255, 28};
+    Color text{240, 240, 245, 255}, textDim{125, 125, 135, 255}, textSelected{255, 255, 255, 255}, title{255, 255, 255, 255};
+    Color subText{190, 190, 200, 255}, sectionText{236, 72, 153, 255}, hint{165, 165, 175, 255};
+    Color switchOn{52, 211, 153, 255}, switchOff{70, 70, 82, 255}, knob{245, 245, 245, 255};
+};
+
+// Width of `s` at `scale` in face `font`, in screen widths (0..1).
+inline float TextWidth(const std::string& s, float scale, int face, const Style& st) {
+    const auto& adv = detail::kAdvance[face >= 0 && face <= 2 ? face : 0];
+    std::uint32_t sum = 0;
+    for (unsigned char ch : s) {
+        if (ch >= 32 && ch <= 126) sum += adv[ch - 32];
+        else if (ch >= 0xC0 || ch < 0x80) sum += 450;  // a UTF-8 lead byte or control: about one glyph
+    }
+    return static_cast<float>(sum) / 1000.0f * scale * st.textHeight / st.aspect;
+}
+// `s` cut to fit `maxW` (screen widths), ending in "..." when cut. Cuts on UTF-8 boundaries.
+inline std::string FitText(const std::string& s, float maxW, float scale, int face, const Style& st) {
+    if (maxW <= 0.0f) return {};
+    if (TextWidth(s, scale, face, st) <= maxW) return s;
+    const float dots = TextWidth("...", scale, face, st);
+    std::string out;
+    for (std::size_t i = 0; i < s.size();) {
+        std::size_t len = 1;
+        unsigned char ch = static_cast<unsigned char>(s[i]);
+        if (ch >= 0xF0) len = 4;
+        else if (ch >= 0xE0) len = 3;
+        else if (ch >= 0xC0) len = 2;
+        std::string next = out + s.substr(i, len);
+        if (TextWidth(next, scale, face, st) + dots > maxW) break;
+        out = std::move(next);
+        i += len;
+    }
+    while (!out.empty() && out.back() == ' ') out.pop_back();
+    return out + "...";
+}
 
 enum class Action { None, Open, Up, Down, Left, Right, Select, Back };
 
 class Page;
 
 struct Item {
-    enum Kind { Button, Toggle, Int, Float, Choice, Submenu } kind = Button;
+    enum Kind { Button, Toggle, Int, Float, Choice, Submenu, Section } kind = Button;
     std::string label;
     std::function<void()> onSelect;  // Button; called after a value change for the others
     bool* flag = nullptr;
@@ -92,6 +146,12 @@ struct Item {
     int precision = 2;
     std::vector<std::string> options;
     Page* page = nullptr;
+    // Presentation, set with Page::Tag / Hint / Dim right after adding the item.
+    std::string tag;          // a short badge drawn before the value ("EXP", "12/40")
+    Color tagColor{90, 90, 100, 230};
+    std::string hint;         // shown in the footer while the item is selected
+    bool dim = false;         // drawn greyed out (still selectable)
+    bool Selectable() const { return kind != Section; }
 };
 
 class Page {
@@ -99,6 +159,28 @@ public:
     explicit Page(std::string title) : title_(std::move(title)) {}
     const std::string& Title() const { return title_; }
     const std::vector<Item>& Items() const { return items_; }
+
+    // A heading row between items: drawn, never selected.
+    Page& Section(std::string title) {
+        Item i;
+        i.kind = Item::Section;
+        i.label = std::move(title);
+        items_.push_back(std::move(i));
+        return *this;
+    }
+    // Presentation of the item added last.
+    Page& Tag(std::string text, Color c) {
+        if (!items_.empty()) { items_.back().tag = std::move(text); items_.back().tagColor = c; }
+        return *this;
+    }
+    Page& Hint(std::string text) {
+        if (!items_.empty()) items_.back().hint = std::move(text);
+        return *this;
+    }
+    Page& Dim(bool d = true) {
+        if (!items_.empty()) items_.back().dim = d;
+        return *this;
+    }
 
     Page& Button(std::string label, std::function<void()> fn) {
         Item i;
@@ -168,22 +250,29 @@ private:
     std::vector<Item> items_;
 };
 
-inline std::string ValueText(const Item& i) {
+// The value an item shows on the right. Toggles show ON/OFF (drawn as a switch by Layout); sliders and
+// choices get arrows when `selected`, since only then do Left/Right change them.
+inline std::string ValueText(const Item& i, bool selected = false) {
     char buf[64];
+    std::string v;
     switch (i.kind) {
     case Item::Toggle: return i.flag && *i.flag ? "ON" : "OFF";
     case Item::Int:
-        std::snprintf(buf, sizeof(buf), "< %d >", i.ival ? *i.ival : 0);
-        return buf;
+        std::snprintf(buf, sizeof(buf), "%d", i.ival ? *i.ival : 0);
+        v = buf;
+        break;
     case Item::Float:
-        std::snprintf(buf, sizeof(buf), "< %.*f >", i.precision, i.fval ? static_cast<double>(*i.fval) : 0.0);
-        return buf;
+        std::snprintf(buf, sizeof(buf), "%.*f", i.precision, i.fval ? static_cast<double>(*i.fval) : 0.0);
+        v = buf;
+        break;
     case Item::Choice:
         if (!i.ival || i.options.empty()) return "";
-        return "< " + i.options[static_cast<std::size_t>(std::clamp(*i.ival, 0, int(i.options.size()) - 1))] + " >";
-    case Item::Submenu: return ">>";
+        v = i.options[static_cast<std::size_t>(std::clamp(*i.ival, 0, int(i.options.size()) - 1))];
+        break;
+    case Item::Submenu: return ">";
     default: return "";
     }
+    return selected ? "<  " + v + "  >" : v;
 }
 
 class Menu {
@@ -202,9 +291,55 @@ public:
     void SetOpen(bool open) { open_ = open; }
     const Page& Current() const { return *stack_.back().page; }
     int Cursor() const { return stack_.back().cursor; }
+    // First row shown. The window moves only as far as needed to keep the cursor in view (and the
+    // section heading right above it, when there is one).
     int ScrollTop(const Style& st) const {
+        const Frame& f = stack_.back();
+        int n = static_cast<int>(f.page->Items().size());
         int vis = std::max(1, st.maxVisible);
-        return std::max(0, Cursor() - vis + 1);
+        int top = std::clamp(f.top, 0, std::max(0, n - vis));
+        int want = f.cursor;
+        if (want > 0 && !f.page->Items()[static_cast<std::size_t>(want - 1)].Selectable()) --want;
+        if (want < top) top = want;
+        if (f.cursor >= top + vis) top = f.cursor - vis + 1;
+        f.top = top;
+        return top;
+    }
+    // "k / n" over selectable items: position of the cursor and how many there are.
+    std::pair<int, int> Position() const {
+        const auto& items = Current().Items();
+        int k = 0, n = 0;
+        for (int i = 0; i < static_cast<int>(items.size()); ++i) {
+            if (!items[static_cast<std::size_t>(i)].Selectable()) continue;
+            ++n;
+            if (i <= Cursor()) k = n;
+        }
+        return {n ? k : 0, n};
+    }
+    // Where the user is: the cursor on each page from the root down. RestorePath re-enters the same submenus
+    // in a menu built the same way, so a plugin can rebuild its menu without losing the user's place.
+    std::vector<int> Path() const {
+        std::vector<int> p;
+        for (const Frame& f : stack_) p.push_back(f.cursor);
+        return p;
+    }
+    void RestorePath(const std::vector<int>& p) {
+        stack_.resize(1);
+        for (std::size_t i = 0; i < p.size(); ++i) {
+            Frame& f = stack_.back();
+            const auto& items = f.page->Items();
+            if (items.empty()) break;
+            f.cursor = Settle(*f.page, std::clamp(p[i], 0, static_cast<int>(items.size()) - 1), +1);
+            const Item& it = items[static_cast<std::size_t>(f.cursor)];
+            if (i + 1 < p.size() && it.kind == Item::Submenu && it.page) stack_.push_back({it.page, 0});
+            else break;
+        }
+    }
+    // Page titles from the root to the current page.
+    std::string Breadcrumb(const char* sep = "  /  ") const {
+        std::string s;
+        for (const Frame& f : stack_) s += (s.empty() ? "" : sep) + f.page->Title();
+        return s;
     }
 
     void Handle(Action a) {
@@ -222,11 +357,11 @@ public:
             return;
         }
         if (n == 0) return;
-        f.cursor = std::clamp(f.cursor, 0, n - 1);
+        f.cursor = Settle(*f.page, std::clamp(f.cursor, 0, n - 1), +1);
         const Item& it = items[static_cast<std::size_t>(f.cursor)];
         switch (a) {
-        case Action::Up: f.cursor = (f.cursor + n - 1) % n; break;
-        case Action::Down: f.cursor = (f.cursor + 1) % n; break;
+        case Action::Up: f.cursor = Settle(*f.page, (f.cursor + n - 1) % n, -1); break;
+        case Action::Down: f.cursor = Settle(*f.page, (f.cursor + 1) % n, +1); break;
         case Action::Left: Adjust(it, -1); break;
         case Action::Right: Adjust(it, +1); break;
         case Action::Select: Activate(it); break;
@@ -243,6 +378,7 @@ public:
         int vis = std::max(1, st.maxVisible);
         int top = ScrollTop(st);
         int shown = std::min(vis, n - top);
+        const float xr = st.x + st.width - st.padX;  // inner right edge
 
         auto rect = [&](float x, float y, float w, float h, Color c) {
             DrawCmd d;
@@ -250,33 +386,117 @@ public:
             d.x = x; d.y = y; d.w = w; d.h = h; d.color = c;
             out.push_back(std::move(d));
         };
-        auto text = [&](std::string s, float x, float y, float scale, Color c, Align al) {
+        auto text = [&](std::string s, float x, float y, float scale, int face, Color c, Align al) {
             DrawCmd d;
             d.kind = DrawCmd::Text;
             d.text = std::move(s);
-            d.x = x; d.y = y; d.scale = scale; d.font = st.font; d.color = c; d.align = al;
+            d.x = x; d.y = y; d.scale = scale; d.font = face; d.color = c; d.align = al;
             out.push_back(std::move(d));
         };
+        // top of a text line of `scale` centred in a row at y of height h
+        auto mid = [&](float y, float h, float scale) { return y + (h - scale * st.textHeight) * 0.5f; };
 
+        // header: title on a dark band, accent stripe below
         rect(st.x, st.y, st.width, st.headerHeight, st.header);
-        text(p.Title(), st.x + st.width * 0.5f, st.y + st.headerHeight * st.textYOffset, st.titleScale, st.title,
-             Align::Center);
+        text(FitText(p.Title(), st.width - 2 * st.padX, st.titleScale, st.titleFont, st), st.x + st.padX * 1.5f,
+             mid(st.y, st.headerHeight, st.titleScale), st.titleScale, st.titleFont, st.title, Align::Left);
+        float y = st.y + st.headerHeight;
+        rect(st.x, y, st.width, st.accentHeight, st.accent);
+        y += st.accentHeight;
+
+        // sub-header: where we are, and the position in the page
+        rect(st.x, y, st.width, st.subHeight, st.sub);
+        auto [k, total] = Position();
+        std::string count = std::to_string(k) + " / " + std::to_string(total);
+        float countW = TextWidth(count, st.subScale, st.font, st);
+        text(count, xr, mid(y, st.subHeight, st.subScale), st.subScale, st.font, st.subText, Align::Right);
+        std::string where = stack_.size() > 1 || st.rootCaption.empty() ? Breadcrumb() : st.rootCaption;
+        text(FitText(where, st.width - 3 * st.padX - countW, st.subScale, st.boldFont, st), st.x + st.padX,
+             mid(y, st.subHeight, st.subScale), st.subScale, st.boldFont, st.subText, Align::Left);
+        y += st.subHeight;
+
+        const float listTop = y;
+        const bool scroll = n > vis;
+        const float scrollW = scroll ? 0.0025f : 0.0f;
+        const float rowW = st.width - scrollW;
+        const float xv = st.x + rowW - st.padX;  // right edge of values (left of the scroll bar)
         for (int row = 0; row < shown; ++row) {
             int idx = top + row;
             const Item& it = items[static_cast<std::size_t>(idx)];
+            float ry = listTop + static_cast<float>(row) * st.itemHeight;
+            if (it.kind == Item::Section) {
+                rect(st.x, ry, rowW, st.itemHeight, st.section);
+                text(FitText(it.label, rowW - 2 * st.padX, st.subScale, st.boldFont, st), st.x + st.padX,
+                     mid(ry, st.itemHeight, st.subScale) + st.itemHeight * 0.08f, st.subScale, st.boldFont, st.sectionText,
+                     Align::Left);
+                continue;
+            }
             bool sel = idx == Cursor();
-            float y = st.y + st.headerHeight + static_cast<float>(row) * st.itemHeight;
-            rect(st.x, y, st.width, st.itemHeight, sel ? st.highlight : st.background);
-            Color tc = sel ? st.textSelected : st.text;
-            float ty = y + st.itemHeight * st.textYOffset;
-            text(it.label, st.x + st.padX, ty, st.itemScale, tc, Align::Left);
-            std::string v = ValueText(it);
-            if (!v.empty()) text(std::move(v), st.x + st.width - st.padX, ty, st.itemScale, tc, Align::Right);
+            rect(st.x, ry, rowW, st.itemHeight, sel ? st.highlight : st.background);
+            if (sel) rect(st.x, ry, 0.0022f, st.itemHeight, st.title);  // a bright edge on the selected row
+            Color tc = sel ? st.textSelected : (it.dim ? st.textDim : st.text);
+            float ty = mid(ry, st.itemHeight, st.itemScale);
+
+            // right side, from the edge inwards: value (or switch), then the tag
+            float right = xv;
+            if (it.kind == Item::Toggle) {
+                const float th = st.itemHeight * 0.46f, tw = th * 2.0f / st.aspect, kh = th * 0.70f, kw = kh / st.aspect;
+                const bool on = it.flag && *it.flag;
+                const float tx = right - tw, tyy = ry + (st.itemHeight - th) * 0.5f;
+                rect(tx, tyy, tw, th, on ? st.switchOn : st.switchOff);
+                const float kx = on ? tx + tw - kw - (th - kh) * 0.5f / st.aspect : tx + (th - kh) * 0.5f / st.aspect;
+                rect(kx, tyy + (th - kh) * 0.5f, kw, kh, st.knob);
+                right = tx - st.padX;
+            } else {
+                std::string v = ValueText(it, sel);
+                if (!v.empty()) {
+                    v = FitText(v, rowW * 0.45f, st.itemScale, st.font, st);
+                    float vw = TextWidth(v, st.itemScale, st.font, st);
+                    Color vc = sel ? st.textSelected : (it.kind == Item::Submenu ? st.textDim : tc);
+                    text(v, right, ty, st.itemScale, st.font, vc, Align::Right);
+                    right -= vw + st.padX;
+                }
+            }
+            if (!it.tag.empty()) {
+                const float tw = TextWidth(it.tag, st.tagScale, st.boldFont, st), padx = 0.0035f;
+                const float th = st.itemHeight * 0.56f, tyy = ry + (st.itemHeight - th) * 0.5f;
+                const float bx = right - tw - 2 * padx;
+                rect(bx, tyy, tw + 2 * padx, th, it.tagColor);
+                text(it.tag, bx + padx, mid(tyy, th, st.tagScale), st.tagScale, st.boldFont, st.textSelected, Align::Left);
+                right = bx - st.padX * 0.6f;
+            }
+            const float labelX = st.x + st.padX + (sel ? 0.002f : 0.0f);
+            text(FitText(it.label, right - labelX, st.itemScale, sel ? st.boldFont : st.font, st), labelX, ty, st.itemScale,
+                 sel ? st.boldFont : st.font, tc, Align::Left);
         }
-        float fy = st.y + st.headerHeight + static_cast<float>(shown) * st.itemHeight;
+        float fy = listTop + static_cast<float>(shown) * st.itemHeight;
+        if (scroll) {  // track and thumb beside the rows
+            float trackH = fy - listTop;
+            rect(st.x + rowW, listTop, scrollW, trackH, st.scrollTrack);
+            float thumbH = std::max(trackH * static_cast<float>(vis) / static_cast<float>(n), st.itemHeight * 0.5f);
+            float thumbY = listTop + (trackH - thumbH) * static_cast<float>(top) / static_cast<float>(std::max(1, n - vis));
+            rect(st.x + rowW, thumbY, scrollW, thumbH, st.accent);
+        }
+
+        // footer: what the selected item does, or the keys
         rect(st.x, fy, st.width, st.footerHeight, st.footer);
-        text(std::to_string(n ? Cursor() + 1 : 0) + " / " + std::to_string(n), st.x + st.width - st.padX,
-             fy + st.footerHeight * st.textYOffset, st.itemScale, st.text, Align::Right);
+        std::string hint;
+        if (Cursor() >= 0 && Cursor() < n) {
+            const Item& it = items[static_cast<std::size_t>(Cursor())];
+            hint = it.hint;
+            if (hint.empty()) {
+                switch (it.kind) {
+                case Item::Toggle: hint = "Enter  switch on / off"; break;
+                case Item::Int: case Item::Float: case Item::Choice: hint = "Left / Right  change"; break;
+                case Item::Submenu: hint = "Enter  open      Backspace  back"; break;
+                case Item::Button: hint = "Enter  run"; break;
+                default: break;
+                }
+            }
+        }
+        if (!hint.empty())
+            text(FitText(hint, st.width - 2 * st.padX, st.hintScale, st.font, st), st.x + st.padX, mid(fy, st.footerHeight, st.hintScale),
+                 st.hintScale, st.font, st.hint, Align::Left);
         return out;
     }
 
@@ -284,7 +504,18 @@ private:
     struct Frame {
         const Page* page;
         int cursor;
+        mutable int top = 0;  // scroll position, kept by ScrollTop
     };
+    // The nearest selectable index from i in direction dir (wrapping), or i when the page has none.
+    static int Settle(const Page& p, int i, int dir) {
+        const auto& items = p.Items();
+        int n = static_cast<int>(items.size());
+        for (int k = 0; k < n; ++k) {
+            int j = ((i + dir * k) % n + n) % n;
+            if (items[static_cast<std::size_t>(j)].Selectable()) return j;
+        }
+        return i;
+    }
 
     static void Changed(const Item& it) {
         if (it.onSelect) it.onSelect();
@@ -315,7 +546,7 @@ private:
         case Item::Button: Changed(it); break;
         case Item::Toggle: Adjust(it, +1); break;
         case Item::Submenu:
-            if (it.page) stack_.push_back({it.page, 0});
+            if (it.page) stack_.push_back({it.page, it.page->Items().empty() ? 0 : Settle(*it.page, 0, +1)});
             break;
         default: break;  // sliders/choices change with Left/Right
         }
