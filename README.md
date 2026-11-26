@@ -7,7 +7,7 @@
 
 <p align="center">
   <img alt="status" src="https://img.shields.io/badge/status-pre--alpha-orange">
-  <img alt="abi" src="https://img.shields.io/badge/ABI-1.6-blue">
+  <img alt="abi" src="https://img.shields.io/badge/ABI-1.7-blue">
   <img alt="target" src="https://img.shields.io/badge/target-GTA%20VI%201.0.2.1%20(Xbox%20Series%20exe)-lightgrey">
   <img alt="scope" src="https://img.shields.io/badge/scope-story%20mode%20%2F%20offline%20only-green">
 </p>
@@ -173,7 +173,7 @@ Legend: ✅ done and verified in game · 🧪 done, unit-tested, not yet confirm
 | D3D12 overlay + `present_register` + `UI_DRAW_RECT/TEXT` | ✅ | WARP ctests + in game (screenshots above) |
 | Entity API (`world_get_all`, `entity_ptr`), `static_ptr` | ✅ / 🧪 | Pool walk seen in game (peds, vehicles, objects); statics only unit-tested |
 | `script_function_call` (ABI 1.6): call a function of a linked script | ✅ | Runs on the borrowed script thread |
-| Async natives (`Task<T>`) such as spawning peds and vehicles | 🚧 | Creation returns a task; the object does not appear yet (script-heap context) |
+| Async natives (`Task<T>`): spawning peds and objects | ✅ | ABI 1.7 `script_object_pin` holds the task with a strong GC handle; models are 64-bit keys ([TRAINER.md](docs/TRAINER.md) §5). Vehicles and single-item give still need their script wrappers |
 | Proxy loader for the PC build | 🧪 | Forwarding verified by test; no PC exe to load into yet |
 | GTA VI PC profile | ⏳ | Placeholder, starts from the Xbox signature set |
 
@@ -196,7 +196,8 @@ Legend: ✅ done and verified in game · 🧪 done, unit-tested, not yet confirm
 
 - [x] Hook, tick, guard, overlay, native table and trainer working in the first gameplay scene
 - [x] NativeDB census, typing, naming, generated SDK headers
-- [ ] Async natives (`Task<T>`): spawn peds / vehicles / give items through the game's own script wrappers
+- [x] Async natives (`Task<T>`): spawn peds and objects through the game's own script wrappers, task pinned (ABI 1.7)
+- [ ] Vehicle spawning and single-item give: locate their script wrappers
 - [ ] Confirm the remaining trainer features by read-back (wanted level, abilities, vitals, weather overrides)
 - [ ] Name more natives (behaviour checks; the 2,850 ranked candidates)
 

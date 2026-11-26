@@ -59,7 +59,7 @@ extern "C" {
 #endif
 
 #define SHVI_ABI_MAJOR 1
-#define SHVI_ABI_MINOR 6
+#define SHVI_ABI_MINOR 7
 
 #define SHVI_OK               0
 #define SHVI_E_INVALID_ARG   -1
@@ -179,6 +179,21 @@ typedef struct shvi_api {
        callbacks only. Check SHVI_API_HAS(api, script_function_call). */
     int       (*script_function_call)(uint32_t program_hash, uint32_t code_offset, const uint64_t* args,
                                       uint32_t argc, uint64_t* ret, uint32_t retc);
+
+    /* --- ABI 1.7 ------------------------------------------------------- */
+    /* Keeps a script object alive (a Task an async native or script function
+       returned, a delegate, ...) the way the engine keeps objects it holds from
+       C++: a strong GC handle owned by the current script instance. Without it
+       the script runtime reclaims an object nothing in a script refers to
+       within a few frames, and an async request dies with its task.
+       `object` is the script reference (as a native returns it). On SHVI_OK
+       `*pin` is an opaque id for script_object_unpin. Unpin when done: pins are
+       a small fixed pool. SHVI_E_NOT_READY outside a script callback or
+       without a current script instance; SHVI_E_UNSUPPORTED when the profile
+       has no handle helpers. Script callbacks only.
+       Check SHVI_API_HAS(api, script_object_pin). */
+    int       (*script_object_pin)(uint64_t object, uint64_t* pin);
+    int       (*script_object_unpin)(uint64_t pin);
 } shvi_api;
 
 /* Plugin entry points (exported by the plugin with these exact C names). */

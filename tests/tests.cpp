@@ -326,7 +326,8 @@ TEST(invoker_has_mapped_and_abi_1_5) {
     a.size = sizeof(shvi_api);
     CHECK(SHVI_API_HAS(&a, native_exists));
     CHECK(offsetof(shvi_api, script_function_call) == offsetof(shvi_api, native_exists) + sizeof(void*));  // 1.6 follows
-    CHECK(SHVI_ABI_MINOR >= 6 && sizeof(shvi_api) == offsetof(shvi_api, script_function_call) + sizeof(void*));
+    CHECK(offsetof(shvi_api, script_object_pin) == offsetof(shvi_api, script_function_call) + sizeof(void*));  // 1.7 follows
+    CHECK(SHVI_ABI_MINOR >= 7 && sizeof(shvi_api) == offsetof(shvi_api, script_object_unpin) + sizeof(void*));
     {
         shvi_api old{};
         old.size = offsetof(shvi_api, script_function_call);  // a 1.5 host

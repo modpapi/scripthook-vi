@@ -204,8 +204,37 @@ has no such place. So the remaining problem is no longer the call but the lifeti
 a script context of our own (a script program the game runs for us), or the engine function that builds
 the ped once the request is ready, called directly.
 
-So all nine spawn and give features stay **blocked** (`[blocked]` in the menu, never run). The code for
-the calls stays, and `settings.runblocked on` in an autorun file re-enables them for a test run.
+**Solved for peds and objects (2026-11-26).** Two separate faults, both found in the code and confirmed in game:
+
+1. *The task was weakly held.* Each script heap has GC handle tables 64 bytes apart from `+5512`
+   (`+5520` slots as `object | count << 56`, `+5536` in-use bitmap, `+5552` cleared on allocation); a handle id
+   is `0x80000000 | heap << 28 | slot << 4 | table`. The async natives register their task in **table 0,
+   which is weak** (`0x14192D3C0`), so the runtime reclaims it once no script refers to it and the request dies
+   with it. **Table 2 is strong**: the engine uses it to hold script objects from C++. Its own helper
+   `0x14381A110(holder[4], object)` enters heap 2, allocates a table-2 handle and registers it with the current
+   script instance; `0x14205D410(holder)` releases it. The hook exposes the pair as **ABI 1.7
+   `script_object_pin` / `script_object_unpin`**, and the trainer pins each creation task until its result is
+   read. (Run 58 had rewritten the top byte of a table-0 slot: that byte is a count, not a type, so it changed
+   nothing.)
+2. *The model was truncated.* GTA VI model keys are **64 bits** (the player's is `0x6B13B6B43F959856`; the low
+   half is the name's joaat). The generated wrappers type models as a 32-bit `Hash`, so every model the
+   trainer passed had lost its high half. With the 32-bit key the creation fails its model check
+   (`0x1400BF810`, type at `+153 & 7` must be 6) and `0x14115B2F0` returns an already-completed task (status 5)
+   with no entity: exactly the "task never changes" of runs 18-22. The trainer now reads models with the full
+   cell (`ModelOf`) and model lists accept `0x` + 16 hex digits.
+
+With both fixed, ped creation through `native.func_018247` and object creation through `native.func_01BE38`
+complete in about 200 ms (task status 3, then 5 with the entity reference at `+0x28`), and the entity is
+1 m from the requested point. Five spawn features are unblocked. A creation can also be refused when the
+script thread the tick borrowed has no instance that may own entities (`0x144F61E80` returns 0); the trainer
+sees the task complete at once with no entity and retries on later ticks. The core logs the gates of the first
+calls ("ped creation gates", "owner check"). The hook now runs `script_function_call` under heap 2 by default
+on this build (`shvi\script_heap.txt` = `auto`, `0`-`2` or `off` overrides).
+
+Still blocked: **vehicle spawning** and **single-weapon give**. Both call their async native directly with a
+built-in task type, which crashed in runs 8 and 9; they need the game's own script wrappers in module `native`
+(as peds and objects use), not yet located. `settings.runblocked on` in an autorun or command file re-enables
+them for a test run.
 
 What is known and reusable: the call path works; the ped native's cells are model, position (2), heading,
 three flags, one unused cell, a 12-byte block (2 cells), a flag, a pointer, an int; a finished task holds

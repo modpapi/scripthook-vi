@@ -79,6 +79,9 @@ public:
                                    std::uint32_t /*argc*/, std::uint64_t* /*ret*/, std::uint32_t /*retc*/) {
         return -4;
     }
+    // ABI 1.7: a strong, script-owned reference to a script object (see shvi.h script_object_pin).
+    virtual int PinScriptObject(std::uint64_t /*object*/, std::uint64_t* /*pin*/) { return -4; }
+    virtual int UnpinScriptObject(std::uint64_t /*pin*/) { return -4; }
 
     // The game's WAIT function, if one is bound. Plugin calls to it are turned
     // into a fiber yield: calling the real one would put the borrowed game

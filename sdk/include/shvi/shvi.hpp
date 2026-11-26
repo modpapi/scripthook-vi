@@ -127,4 +127,14 @@ inline int script_function_call(std::uint32_t program, std::uint32_t offset, con
                                                  : SHVI_E_UNSUPPORTED;
 }
 
+// ABI 1.7: keep a script object (a Task) alive until unpinned. SHVI_E_UNSUPPORTED on older hosts.
+inline int script_object_pin(std::uint64_t object, std::uint64_t* pin) {
+    const shvi_api* a = api();
+    return a && SHVI_API_HAS(a, script_object_pin) && a->script_object_pin ? a->script_object_pin(object, pin) : SHVI_E_UNSUPPORTED;
+}
+inline int script_object_unpin(std::uint64_t pin) {
+    const shvi_api* a = api();
+    return a && SHVI_API_HAS(a, script_object_unpin) && a->script_object_unpin ? a->script_object_unpin(pin) : SHVI_E_UNSUPPORTED;
+}
+
 }  // namespace shvi
