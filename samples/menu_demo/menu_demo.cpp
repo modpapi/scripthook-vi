@@ -13,11 +13,7 @@
 #include <shvi/vi_ui.hpp>
 #include <shvi/natives_vi.hpp>  // generated from the native table (tools/docgen/gen_natives.js)
 
-#include <windows.h>
-
 #include <cstdio>
-
-extern "C" IMAGE_DOS_HEADER __ImageBase;
 
 namespace {
 
@@ -110,5 +106,5 @@ extern "C" SHVI_PLUGIN_EXPORT int shvi_plugin_load(const shvi_api* a) {
     shvi::api() = a;
     int rc = a->keyboard_register(&shvi::ui::InputQueue::OnKey, &g_input);
     if (rc != SHVI_OK) return rc;
-    return a->script_register(&__ImageBase, ScriptMain, nullptr);
+    return a->script_register(SHVI_THIS_MODULE, ScriptMain, nullptr);
 }

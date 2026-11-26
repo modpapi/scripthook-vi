@@ -1,0 +1,98 @@
+# Builds and tests the engine, SDK and CLI on every platform. Also called by release.yml, which
+# packages what these jobs upload.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: win64 (core, samples, sim, tests)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Configure
+        run: cmake -S . -B build -A x64
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Install (game folder layout + tools)
+        run: cmake --install build --config Release --prefix dist/win64
+      - name: CLI unit tests
+        working-directory: tools/shvi-cli
+        run: bun test test/unit.test.ts
+      - name: CLI end to end (every template -> pc build -> simulator -> zip)
+        working-directory: tools/shvi-cli
+        env:
+          SHVI_E2E: "1"
+        run: bun test test/e2e.test.ts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win64-runtime
+          path: dist/win64
+          if-no-files-found: error
+
+  linux-sim:
+    name: sim (Linux engine, simulator, PS5 host tests)
+    runs-on: ubuntu-24.04
+    env:
+      CC: clang-18
+      CXX: clang++-18
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Configure
+        run: cmake -S . -B build/sim -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build/sim --parallel
+      - name: Test
+        run: ctest --test-dir build/sim --output-on-failure
+      - name: PS5 host tests (self2elf, process selection)
+        run: make -C platforms/ps5 test CC=clang-18
+      - name: CLI unit tests
+        working-directory: tools/shvi-cli
+        run: bun test test/unit.test.ts
+
+  ps5:
+    name: ps5 (loader payload, mod images, CLI e2e)
+    runs-on: ubuntu-24.04
+    env:
+      CC: clang-18
+      CXX: clang++-18
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Host toolchain for ps5-payload-sdk
+        run: sudo apt-get update && sudo apt-get install -y clang-18 lld-18 unzip
+      - name: ps5-payload-sdk (through the CLI, as a mod author would)
+        run: |
+          bun tools/shvi-cli/src/cli.ts doctor --install-ps5-sdk
+          echo "PS5_PAYLOAD_SDK=$HOME/.shvi/ps5-payload-sdk" >> "$GITHUB_ENV"
+      - name: Configure
+        run: cmake -S . -B build/ps5 -DCMAKE_TOOLCHAIN_FILE=sdk/cmake/toolchains/ps5.cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_VERBOSE_MAKEFILE=OFF
+      - name: Build
+        run: cmake --build build/ps5 --parallel
+      - name: Check outputs
+        run: |
+          for f in shvi_loader hello_engine menu_demo trainer; do
+            file build/ps5/$f.elf | tee /dev/stderr | grep -q "ELF 64-bit LSB pie executable, x86-64"
+          done
+      - name: CLI end to end (every template -> sim test -> ps5 image + loader -> zip)
+        working-directory: tools/shvi-cli
+        env:
+          SHVI_E2E: "1"
+        run: bun test test/e2e.test.ts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ps5-elfs
+          path: build/ps5/*.elf
+          if-no-files-found: error

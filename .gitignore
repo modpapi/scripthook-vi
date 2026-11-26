@@ -1,2 +1,9 @@
 build/
 dist/
+node_modules/
+__pycache__/
+# PS5: game-derived files and build outputs never go in the repo
+platforms/ps5/work/
+platforms/ps5/build/
+platforms/ps5/payload/build/
+*.elf

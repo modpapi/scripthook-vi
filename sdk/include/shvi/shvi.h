@@ -24,6 +24,36 @@
 #include <stdint.h>
 #include <string.h>
 
+/* Platforms -------------------------------------------------------------
+   One SDK, one source tree per mod, one binary per platform:
+     SHVI_PLATFORM_WIN64  PC / Windows x64: the mod is a DLL named <mod>.asi
+     SHVI_PLATFORM_PS5    PS5 (ps5-payload-sdk, prospero-clang): an ELF shared object <mod>.so
+     SHVI_PLATFORM_SIM    desktop simulator (shvi_sim): runs a mod offline with no game, for
+                          tests and CI (a .so on Linux/macOS, a .dll on Windows)
+   The SDK's CMake passes -DSHVI_PLATFORM_<NAME>=1; otherwise it is detected here. */
+#if !defined(SHVI_PLATFORM_WIN64) && !defined(SHVI_PLATFORM_PS5) && !defined(SHVI_PLATFORM_SIM)
+#  if defined(__PROSPERO__) || defined(__PS5__)
+#    define SHVI_PLATFORM_PS5 1
+#  elif defined(_WIN64)
+#    define SHVI_PLATFORM_WIN64 1
+#  else
+#    define SHVI_PLATFORM_SIM 1
+#  endif
+#endif
+#if defined(SHVI_PLATFORM_WIN64)
+#  define SHVI_PLATFORM_NAME "win64"
+#elif defined(SHVI_PLATFORM_PS5)
+#  define SHVI_PLATFORM_NAME "ps5"
+#else
+#  define SHVI_PLATFORM_NAME "sim"
+#endif
+
+#if defined(_MSC_VER)
+#  define SHVI_INLINE static __inline
+#else
+#  define SHVI_INLINE static inline
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -75,7 +105,8 @@ typedef struct shvi_api {
     uint32_t    (*game_build)(void);           /* exe build number          */
     int         (*is_blocked)(void);           /* 1 once the guard latched  */
 
-    /* Register a script fiber. module = your HMODULE (&__ImageBase). */
+    /* Register a script fiber. module identifies your plugin: pass SHVI_THIS_MODULE
+       (on Windows that is &__ImageBase; elsewhere any address inside your binary). */
     int  (*script_register)(void* module, shvi_script_fn fn, void* user);
     void (*module_unregister)(void* module);
     void (*script_wait)(uint32_t ms);
@@ -150,22 +181,26 @@ typedef struct shvi_api {
                                       uint32_t argc, uint64_t* ret, uint32_t retc);
 } shvi_api;
 
-/* Plugin entry points (exported by the .asi with these exact C names). */
-#define SHVI_PLUGIN_EXPORT __declspec(dllexport)
+/* Plugin entry points (exported by the plugin with these exact C names). */
+#if defined(_WIN32)
+#  define SHVI_PLUGIN_EXPORT __declspec(dllexport)
+#else
+#  define SHVI_PLUGIN_EXPORT __attribute__((visibility("default")))
+#endif
 typedef int  (*shvi_plugin_load_fn)(const shvi_api* api);
 typedef void (*shvi_plugin_unload_fn)(void);
 
 /* Helpers -------------------------------------------------------------- */
-static __inline uint64_t shvi_f2u(float f)   { uint32_t b; memcpy(&b, &f, 4); return b; }
-static __inline float    shvi_u2f(uint64_t u){ uint32_t b = (uint32_t)u; float f; memcpy(&f, &b, 4); return f; }
-static __inline uint64_t shvi_p2u(const void* p) { return (uint64_t)(uintptr_t)p; }
+SHVI_INLINE uint64_t shvi_f2u(float f)   { uint32_t b; memcpy(&b, &f, 4); return b; }
+SHVI_INLINE float    shvi_u2f(uint64_t u){ uint32_t b = (uint32_t)u; float f; memcpy(&f, &b, 4); return f; }
+SHVI_INLINE uint64_t shvi_p2u(const void* p) { return (uint64_t)(uintptr_t)p; }
 
 /* Engine functions (GTA VI) are named, not numbered: their hash is
    SHVI_ENGINE_HASH_TAG | atStringHash(name). atStringHash folds ASCII case,
    hashes '\' as '/', and with a leading '"' stops at the closing quote.
    shvi_engine_hash("STRING_HASH") is what a profile binds that name under. */
 #define SHVI_ENGINE_HASH_TAG 0x5649000000000000ULL /* "VI" */
-static __inline uint64_t shvi_engine_hash(const char* s) {
+SHVI_INLINE uint64_t shvi_engine_hash(const char* s) {
     uint32_t h = 0;
     int quoted = (*s == '"');
     if (quoted) ++s;
@@ -188,11 +223,31 @@ static __inline uint64_t shvi_engine_hash(const char* s) {
 #define SHVI_API_HAS(api, field)     ((api)->size >= offsetof(shvi_api, field) + sizeof(((shvi_api*)0)->field))
 
 /* Checks that the host speaks our major and has every field we were built with. */
-static __inline int shvi_api_compatible(const shvi_api* api) {
+SHVI_INLINE int shvi_api_compatible(const shvi_api* api) {
     return api && api->abi_major == SHVI_ABI_MAJOR && api->size >= sizeof(shvi_api);
 }
 
 #ifdef __cplusplus
 }
 #endif
+
+/* SHVI_THIS_MODULE: the handle a plugin passes to script_register, tick_register and
+   module_unregister. Older plugins pass the module base (&__ImageBase, which the linker
+   provides). The SDK passes a per-module anchor instead, on every platform, and the host
+   maps it to its module (GetModuleHandleEx on Windows, dladdr on ELF platforms). */
+#ifdef __cplusplus
+extern "C" {
+#endif
+/* Not const: a const variable at namespace scope has internal linkage in C++, and the anchor must be
+   one object per module (weak / selectany merges the copies from every translation unit). */
+#if defined(_MSC_VER)
+__declspec(selectany) char shvi_module_anchor = 0;
+#else
+__attribute__((weak, visibility("hidden"))) char shvi_module_anchor = 0;
+#endif
+#ifdef __cplusplus
+}
+#endif
+#define SHVI_THIS_MODULE ((void*)&shvi_module_anchor)
+
 #endif /* SHVI_H */

@@ -44,6 +44,33 @@ struct HashName {
 };
 #include "trainer_data.inc"
 
+// Reads and writes of script objects the trainer does not own (the experimental task features). On MSVC
+// they run under SEH; elsewhere there is no portable fault guard yet, so they are refused (return false)
+// and those features report "unreadable" instead of risking a crash.
+namespace guarded {
+#if defined(_MSC_VER)
+inline bool Copy(void* dst, std::uintptr_t src, std::size_t n) {
+    __try {
+        std::memcpy(dst, reinterpret_cast<const void*>(src), n);
+        return true;
+    } __except (1) {
+        return false;
+    }
+}
+inline bool Bump16(std::uintptr_t at) {
+    __try {
+        ++*reinterpret_cast<std::uint16_t*>(at);
+        return true;
+    } __except (1) {
+        return false;
+    }
+}
+#else
+inline bool Copy(void*, std::uintptr_t, std::size_t) { return false; }
+inline bool Bump16(std::uintptr_t) { return false; }
+#endif
+}  // namespace guarded
+
 enum class Conf : std::uint8_t { Verified = 0, Corroborated = 1, Inferred = 2, Guide = 3, Conflict = 4, Denied = 5, Unknown = 6 };
 
 struct NativeMeta {
@@ -503,16 +530,9 @@ private:
         Log(m);
         if (rc == SHVI_OK && task) DumpTask(task, "at return");
     }
-    static void BumpWord(std::uint64_t at) {
-        __try { ++*reinterpret_cast<std::uint16_t*>(static_cast<std::uintptr_t>(at)); } __except (1) {}
-    }
+    static void BumpWord(std::uint64_t at) { guarded::Bump16(static_cast<std::uintptr_t>(at)); }
     static bool ReadWordsAt(std::uint64_t at, std::uint64_t* q, int n) {
-        __try {
-            std::memcpy(q, reinterpret_cast<const void*>(static_cast<std::uintptr_t>(at)), static_cast<std::size_t>(n) * 8);
-            return true;
-        } __except (1) {
-            return false;
-        }
+        return guarded::Copy(q, static_cast<std::uintptr_t>(at), static_cast<std::size_t>(n) * 8);
     }
     void DumpTask(std::uint64_t task, const char* when) {  // the 24-byte object header sits before the reference
         std::uint64_t q[12] = {};
@@ -574,21 +594,11 @@ private:
         std::uint64_t last[12] = {};
     };
     static bool ReadTaskWords(std::uint64_t task, std::uint64_t* q) {
-        __try {
-            std::memcpy(q, reinterpret_cast<const void*>(static_cast<std::uintptr_t>(task)), 64);
-            return true;
-        } __except (1) {
-            return false;
-        }
+        return guarded::Copy(q, static_cast<std::uintptr_t>(task), 64);
     }
     // The task is a script object we do not own; it may be gone. Read it under SEH.
     static bool ReadTaskResult(std::uint64_t task, Ref* out) {
-        __try {
-            std::memcpy(out, reinterpret_cast<const void*>(static_cast<std::uintptr_t>(task) + 0x28), sizeof(Ref));
-            return true;
-        } __except (1) {
-            return false;
-        }
+        return guarded::Copy(out, static_cast<std::uintptr_t>(task) + 0x28, sizeof(Ref));
     }
     SpawnWatch watch_;
     Ref lastSpawned_{};
@@ -1319,7 +1329,11 @@ private:
             if (!f.on) return;
             std::time_t t = std::time(nullptr);
             std::tm lt{};
+#if defined(_WIN32)
             localtime_s(&lt, &t);
+#else
+            localtime_r(&t, &lt);
+#endif
             A::SET_CLOCK_TIME(lt.tm_hour, lt.tm_min, lt.tm_sec, false);
         });
 

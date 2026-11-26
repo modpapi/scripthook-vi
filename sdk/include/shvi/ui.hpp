@@ -327,10 +327,12 @@ private:
 };
 
 // Virtual-key codes (winuser.h values; spelled out so this header needs no <windows.h>).
+// Every platform delivers keys as these codes: on PS5 the runtime maps the pad to them
+// (R3+L1 -> F4, d-pad -> arrows, Cross -> Return, Circle -> Back, see platforms/ps5/README.md).
 namespace vk {
 inline constexpr std::uint32_t Back = 0x08, Return = 0x0D, Left = 0x25, Up = 0x26, Right = 0x27, Down = 0x28;
-inline constexpr std::uint32_t Numpad0 = 0x60, Numpad2 = 0x62, Numpad4 = 0x64, Numpad5 = 0x65, Numpad6 = 0x66,
-                               Numpad8 = 0x68, F4 = 0x73;
+inline constexpr std::uint32_t Numpad0 = 0x60, Numpad2 = 0x62, Numpad3 = 0x63, Numpad4 = 0x64, Numpad5 = 0x65,
+                               Numpad6 = 0x66, Numpad8 = 0x68, Numpad9 = 0x69, F4 = 0x73;
 }  // namespace vk
 
 struct KeyMap {

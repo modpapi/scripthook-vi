@@ -30,6 +30,7 @@
 ## Contents
 
 - [What it is](#what-it-is)
+- [One engine, every platform: PC, PS5, simulator](#one-engine-every-platform-pc-ps5-simulator)
 - [Screenshots](#screenshots)
 - [How it runs today: the VIctory host](#how-it-runs-today-the-victory-host)
 - [Current progress](#current-progress)
@@ -63,6 +64,39 @@ have no stable name hashes (the VM calls handlers by build-specific code offset)
 | **Online guard** | Reads the game mode; plugins run only in story mode, and the guard latches off for the session on an online session or a loaded anti-cheat client |
 | **Overlay** | Generic DXGI/D3D12 hooks + Dear ImGui DX12 backend; plugins draw through a double-buffered draw list |
 | **SDK** | Stable C ABI (`shvi.h`), C++ sugar (`shvi.hpp`), menu toolkit (`ui.hpp`), typed natives (`natives_full.hpp`) |
+
+## One engine, every platform: PC, PS5, simulator
+
+One mod source builds for every platform. The SDK picks the binary format, and the `shvi` CLI does the rest:
+
+```sh
+shvi new                      # guided: name, platforms (PC / PS5), language (C++ / C), template, CI workflow
+shvi build                    # pc -> <mod>.asi   ps5 -> <mod>.elf + shvi_loader.elf   (PS5 via WSL on Windows)
+shvi test                     # run the mod offline in the simulator: no game, scripted keys, menu as text
+shvi package                  # dist/<mod>-<version>-pc.zip / -ps5.zip
+shvi deploy ps5 --host <ip>   # FTP the image, send the loader to the console's ELF loader (asks first)
+```
+
+| Platform | Mod binary | Host | State |
+|---|---|---|---|
+| **PC** (`win64`) | `<mod>.asi` | `src/core` (this README) | in game ✅ |
+| **PS5** (`ps5`) | `<mod>.elf`: the mod + PS5 runtime + portable engine, one payload ELF; plus `shvi_loader.elf` | [`platforms/ps5`](platforms/ps5/README.md) | builds ✅, host-tested ✅, dry run and loader on console 🧪, in-game mapping 📐 |
+| **Simulator** (`sim`) | `<mod>.so`, or the PC `.asi` | `tools/sim` on `src/engine` | ✅ CI |
+
+- **Templates**: `blank` (C or C++), `menu`, `trainer` (a mod-menu trainer whose features appear only when the
+  running build binds their natives). Each one is generated, built and run in CI on Windows, Linux and PS5.
+- **SDK**: `sdk/include` (the C ABI and C++ layers, unchanged ABI 1.6) plus `sdk/cmake/ShviMod.cmake`
+  (`shvi_add_mod()`) and `sdk/cmake/toolchains/ps5.cmake` (ps5-payload-sdk). Mods register with `SHVI_THIS_MODULE`;
+  `shvi/platform.h` gives the data folder on each platform; the PS5 pad arrives as the same key codes (L1+R3 = F4).
+- **Portable engine** (`src/engine`): the `shvi_api` table, a fiber/ucontext script scheduler, the plugin loader.
+  The simulator and the PS5 runtime use it; the Windows core keeps its in-game verified implementation of the same ABI.
+- **Install the CLI**: `curl -fsSL https://github.com/modpapi/scripthook-vi/releases/latest/download/install.sh | bash`
+  (or `install.ps1` with `irm … | iex` on Windows), or from a checkout `cd tools/shvi-cli && bun link`.
+- **GitHub automation**: `.github/workflows/ci.yml` builds and tests win64, sim and ps5 (with ps5-payload-sdk) and
+  runs the CLI end to end. `release.yml` publishes the SDK, the CLI binaries and the install scripts on `v*` tags.
+  Generated mods get their own `build.yml` (simulate, pc, ps5, release).
+
+The mod developer guide is [docs/SDK.md](docs/SDK.md).
 
 ## Screenshots
 
@@ -221,6 +255,10 @@ ctest --test-dir build -C Release --output-on-failure
 cmake --install build --config Release --prefix dist
 ```
 
+Other platforms (the same tree): `cmake -S . -B build/sim` on Linux/macOS (engine, simulator, samples as `.so`,
+tests), and `cmake -S . -B build/ps5 -DCMAKE_TOOLCHAIN_FILE=sdk/cmake/toolchains/ps5.cmake` with ps5-payload-sdk
+(`shvi_loader.elf` and the samples as PS5 mod images).
+
 The unit tests need no game. With your own copy of the exe, `-DSHVI_GTA6_XBOX_EXE=<path>` adds the offline
 signature and crossmap checks as ctests.
 
@@ -273,7 +311,6 @@ which target is missing.
 
 ```c
 #include <shvi/shvi.h>
-extern IMAGE_DOS_HEADER __ImageBase;
 static const shvi_api* api;
 
 static void main_loop(void* user) {
@@ -289,7 +326,7 @@ static void main_loop(void* user) {
 SHVI_PLUGIN_EXPORT int shvi_plugin_load(const shvi_api* a) {
     if (!shvi_api_compatible(a)) return SHVI_E_ABI_MISMATCH;
     api = a;
-    return a->script_register(&__ImageBase, main_loop, NULL);
+    return a->script_register(SHVI_THIS_MODULE, main_loop, NULL);  /* same on PC and PS5 */
 }
 ```
 
@@ -372,6 +409,8 @@ exe (IDA databases, query scripts) stays outside the repository.
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Layer diagram, layers A to G |
 | [docs/REFERENCE_ANALYSIS.md](docs/REFERENCE_ANALYSIS.md) | How ScriptHookV-era projects locate natives, invoke them, impersonate threads and schedule scripts |
 | [docs/SCRIPT_MODDING.md](docs/SCRIPT_MODDING.md) | The VI script runtime (C#-like IL, linked modules), the engine's script patch system, routes to mod scripts and draw menus |
+| [docs/SDK.md](docs/SDK.md) | Mod developer guide: the `shvi` CLI, templates, `shvi_add_mod`, portable mods, the simulator, PS5 |
+| [platforms/ps5/README.md](platforms/ps5/README.md) | The PS5 platform: runtime, loader payload, status; design notes in [docs/ps5/](docs/ps5/) |
 | [docs/NATIVEDB.md](docs/NATIVEDB.md) | The NativeDB: files, hashes, naming method and confidence levels |
 | [docs/TRAINER.md](docs/TRAINER.md) | The sample trainer: features, gating, what was confirmed in game |
 | [hosts/victory/](hosts/victory/) | The host patch for VIctory-based layers |
@@ -379,14 +418,18 @@ exe (IDA databases, query scripts) stays outside the repository.
 ## Layout
 
 ```
-sdk/include/shvi/   shvi.h (C ABI), shvi.hpp, ui.hpp, vi_ui.hpp, natives_vi.hpp, natives_full.hpp
+sdk/include/shvi/   shvi.h (C ABI), shvi.hpp, platform.h, ui.hpp, vi_ui.hpp, natives_vi.hpp, natives_full.hpp
+sdk/cmake/          ShviMod.cmake (shvi_add_mod, shvi_add_ps5_loader), toolchains/ps5.cmake
+src/engine/         PORTABLE engine: shvi_api host, fiber/ucontext scheduler, plugin loader (sim, PS5)
+platforms/ps5/      PS5: runtime (engine + pad + log), loader payload (shvi_loader.elf), self2elf, tests
 src/loader/         generic proxy: MASM jump stubs + per-DLL export lists
 src/core/           GENERIC: scanner, PE, invoker, fibers, guard, crossmap, native table, overlay, core DLL
 src/games/gta6/     PER BUILD: Xbox 1.0.2.1 signatures, script runtime model, PC placeholder
 nativedb/db/        NativeDB per build (PE timestamp)
 crossmap/           default per-build native table
 hosts/victory/      host patch for VIctory-based compatibility layers
-tools/              shvi_scan, shvi_pick_proxy, shvi_nativedb
+tools/              shvi_scan, shvi_pick_proxy, shvi_nativedb, sim (shvi_sim), shvi-cli (bun), release
+.github/workflows/  ci.yml (win64 + sim + ps5 + CLI e2e), release.yml (SDK + CLI binaries on v* tags)
 samples/            hello_engine (C), menu_demo (C++), trainer (C++, 181 features)
 tests/              unit tests (no game), proxy forwarding, NativeDB, D3D12 overlay (WARP)
 assets/             README screenshots
