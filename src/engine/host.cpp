@@ -110,6 +110,8 @@ struct HostAbi {
                                   std::uint32_t) {
         return SHVI_E_UNSUPPORTED;
     }
+    static int ScriptObjectPin(std::uint64_t, std::uint64_t*) { return SHVI_E_UNSUPPORTED; }
+    static int ScriptObjectUnpin(std::uint64_t) { return SHVI_E_UNSUPPORTED; }
 };
 
 Host::Host(HostConfig cfg)
@@ -140,6 +142,8 @@ Host::Host(HostConfig cfg)
     api_.present_unregister = &HostAbi::PresentUnregister;
     api_.native_exists = &HostAbi::NativeExists;
     api_.script_function_call = &HostAbi::ScriptFunctionCall;
+    api_.script_object_pin = &HostAbi::ScriptObjectPin;
+    api_.script_object_unpin = &HostAbi::ScriptObjectUnpin;
 }
 
 Host::~Host() {

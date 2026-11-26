@@ -290,6 +290,20 @@ int ApiScriptFunctionCall(std::uint32_t program, std::uint32_t offset, const std
     return g->profile->CallScriptFunction(program, offset, args, argc, ret, retc);
 }
 
+int ApiScriptObjectPin(std::uint64_t object, std::uint64_t* pin) {
+    if (!g || !g->profile) return SHVI_E_NOT_READY;
+    if (g->guard.Latched()) return SHVI_E_BLOCKED;
+    if (!object || !pin) return SHVI_E_INVALID_ARG;
+    if (!InGameCallback("script_object_pin")) return SHVI_E_NOT_READY;
+    return g->profile->PinScriptObject(object, pin);
+}
+int ApiScriptObjectUnpin(std::uint64_t pin) {
+    if (!g || !g->profile) return SHVI_E_NOT_READY;
+    if (!pin) return SHVI_E_INVALID_ARG;
+    if (!InGameCallback("script_object_unpin")) return SHVI_E_NOT_READY;
+    return g->profile->UnpinScriptObject(pin);
+}
+
 // ABI 1.4: each plugin registration is its own overlay callback (a trampoline with
 // {fn, user} as its user pointer), so a faulting plugin is dropped alone. Entries
 // are never freed: a present in flight on this thread may still hold one.
@@ -378,6 +392,7 @@ const shvi_api g_api = {
     ApiPresentRegister, ApiPresentUnregister,  // 1.4
     ApiNativeExists,                           // 1.5
     ApiScriptFunctionCall,                     // 1.6
+    ApiScriptObjectPin, ApiScriptObjectUnpin,  // 1.7
 };
 
 // ------------------------------------------------------------------ startup

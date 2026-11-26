@@ -375,17 +375,22 @@ void TestSpawnThroughScriptWrappers() {
     CHECK(fx.t.Find("spawn.clone")->missing.find("script_function_call") != std::string::npos);
     can = true;
     fx.t.Refresh();
-    CHECK(fx.t.Find("spawn.clone")->blocked && !fx.t.Find("spawn.clone")->available);  // blocked after runs 10-15
-    CHECK(!fx.t.Activate("spawn.clone") && calls.empty());
-    fx.t.settings.runBlocked = true;  // the retry switch: the call the trainer would make
-    fx.t.Refresh();
-    CHECK(fx.t.Find("spawn.clone")->available && fx.t.Find("spawn.clone")->experimental);
+    // unblocked 2026-11-26 (pinned task, 64-bit model key) and confirmed in game: usable without any switch
+    CHECK(!fx.t.Find("spawn.clone")->blocked && fx.t.Find("spawn.clone")->checked);
+    CHECK(fx.t.Find("spawn.clone")->available && !fx.t.Find("spawn.clone")->experimental && fx.t.Usable(*fx.t.Find("spawn.clone")));
+    CHECK(fx.t.Find("spawn.vehicle")->blocked);  // the vehicle creator has no script wrapper yet
     g_results[H("GET_ENTITY_MODEL")] = {0xCAFEu};
     g_results[H("GET_ENTITY_COORDS")] = {PackXY(10.0f, 20.0f), F(30.0f)};
     g_results[H("GET_ENTITY_FORWARD_VECTOR")] = {PackXY(1.0f, 0.0f), F(0.0f)};
     g_results[H("GET_ENTITY_HEADING")] = {F(1.5f)};
     fx.t.Find("spawn.distance")->f = 6.0f;
+    static std::vector<std::uint64_t> pinned, unpinned;
+    pinned.clear();
+    unpinned.clear();
+    fx.t.SetPin([](std::uint64_t obj, std::uint64_t* pin) { pinned.push_back(obj); *pin = 7; return SHVI_OK; },
+                [](std::uint64_t pin) { unpinned.push_back(pin); return SHVI_OK; });
     CHECK(fx.t.Activate("spawn.clone"));
+    CHECK(pinned.size() == 1 && pinned[0] == 0x1234 && unpinned.empty());  // the returned task is pinned at once
     CHECK(calls.size() == 1 && calls[0].prog == 0x48391B87u && calls[0].off == 0x18247u && calls[0].retc == 1);
     CHECK(calls[0].args.size() == 13 && calls[0].args[0] == 0xCAFEu);
     CHECK(calls[0].args[1] == PackXY(16.0f, 20.0f) && calls[0].args[2] == F(30.0f) && calls[0].args[3] == F(1.5f));
@@ -393,6 +398,7 @@ void TestSpawnThroughScriptWrappers() {
     fx.t.SetModelList({"0x1234ABCD"});
     CHECK(fx.t.Activate("spawn.object"));
     CHECK(calls.size() == 2 && calls[1].off == 0x1BE38u && calls[1].args.size() == 10 && calls[1].args[0] == 0x1234ABCDu);
+    CHECK(unpinned.size() == 1 && unpinned[0] == 7 && pinned.size() == 2);  // a new watch releases the previous pin
     CHECK(Count("VI_CREATE_PED_ASYNC") == 0 && Count("VI_CREATE_OBJECT_ASYNC") == 0);  // never the natives directly
 }
 

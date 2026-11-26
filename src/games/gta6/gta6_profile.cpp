@@ -687,6 +687,92 @@ bool SehWriteSlot(std::uintptr_t heap, std::uint32_t index, std::uint64_t value)
         return false;
     }
 }
+// --- ABI 1.7 pins (2026-11-26, from the code; Xbox ts 1794606036 only) ---
+// Each script heap has handle tables 64 bytes apart from +5512; a handle is 0x80000000 | heap << 28 |
+// slot << 4 | table. Table 0 is weak: the async natives register their Task there (0x14192D3C0), so the
+// runtime reclaims the task once no script refers to it (runs 18-22 and 58). Table 2 is what the engine
+// uses to hold script objects from C++: 0x14381A110(holder, object) enters heap 2, allocates a table-2
+// handle and registers it with the current script instance; 0x14205D410(holder) releases it (both seen
+// on the three callback fields an engine object keeps, 0x141D0A430). A holder is 16 bytes:
+// {handle, instance id, registration, second handle}.
+struct ScriptPins {
+    static constexpr std::uintptr_t kPin = 0x381A110, kUnpin = 0x205D410;
+    static constexpr std::uint32_t kSlots = 256;
+    struct alignas(16) Holder {
+        std::uint32_t w[4];
+    };
+    Holder holders[kSlots] = {};
+    bool used[kSlots] = {};
+    std::mutex mu;
+};
+ScriptPins g_pins;
+bool SehCurrentScriptInstance(std::uintptr_t tls, std::uintptr_t* out) {
+    __try {
+        *out = *reinterpret_cast<const std::uintptr_t*>(tls + 5240);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+bool SehPinObject(std::uintptr_t base, ScriptPins::Holder* h, std::uint64_t object) {
+    __try {
+        reinterpret_cast<char (*)(std::uint32_t*, std::uint64_t)>(base + ScriptPins::kPin)(h->w, object);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+bool SehUnpinObject(std::uintptr_t base, ScriptPins::Holder* h) {
+    __try {
+        reinterpret_cast<std::int64_t (*)(std::uint32_t*)>(base + ScriptPins::kUnpin)(h->w);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// Ped creation gates (0x14115B2F0): a completed task with a null ped comes back when any fails. Diagnostic for
+// the ped wrapper calls: the owning script instance (0x144F61E80, 0 = none or not allowed), the model info with
+// and without the deny list (0x1400BF810; type at +153 & 7 must be 6), and the ped pool's two counters.
+struct SpawnDiag {
+    std::uint32_t owner = 0, typeChecked = 0xFF, typeAny = 0xFF, pool24 = 0, pool28 = 0;
+    std::uintptr_t info = 0, infoAny = 0;
+    // the owner check, step by step: TLS +5240 -> +8 -> id +840; registry lookup; state +836; vtable +88
+    std::uint32_t id = 0, state = 0xFF;
+    std::uintptr_t tlsObj = 0, inst = 0, mayCreate = 0;
+    int mayCreateResult = -1;
+};
+bool SehSpawnDiag(std::uintptr_t base, std::uint64_t model, SpawnDiag* d) {
+    __try {
+        reinterpret_cast<char (*)(std::uint32_t*)>(base + 0x4F61E80)(&d->owner);
+        reinterpret_cast<std::uint64_t (*)(std::uint32_t*)>(base + 0x4F61F00)(&d->id);
+        d->tlsObj = *reinterpret_cast<const std::uintptr_t*>(EngineTlsBlock() + 5240);
+        if (d->id) {
+            d->inst = reinterpret_cast<std::uintptr_t (*)(std::uint32_t)>(base + 0x4F61F30)(d->id);
+            if (d->inst) {
+                d->state = *reinterpret_cast<const std::uint8_t*>(d->inst + 836);
+                d->mayCreate = *reinterpret_cast<const std::uintptr_t*>(*reinterpret_cast<const std::uintptr_t*>(d->inst) + 88);
+                if (d->mayCreate == base + 0x4870) d->mayCreateResult = 2;  // the default: allowed
+                else d->mayCreateResult = reinterpret_cast<char (*)(std::uintptr_t)>(d->mayCreate)(d->inst) ? 1 : 0;
+            }
+        }
+        std::uint32_t idx = 0;
+        auto lookup = reinterpret_cast<std::uintptr_t (*)(std::uint64_t, std::uint32_t*, char)>(base + 0xBF810);
+        d->info = lookup(model, &idx, 0);
+        d->infoAny = lookup(model, &idx, 1);
+        if (d->info) d->typeChecked = *reinterpret_cast<const std::uint8_t*>(d->info + 153) & 7;
+        if (d->infoAny) d->typeAny = *reinterpret_cast<const std::uint8_t*>(d->infoAny + 153) & 7;
+        auto pool = *reinterpret_cast<const std::uintptr_t*>(base + 0xAAD3CD0);
+        if (pool) {
+            d->pool24 = *reinterpret_cast<const std::uint32_t*>(pool + 24);
+            d->pool28 = *reinterpret_cast<const std::uint32_t*>(pool + 28);
+        }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 std::uint64_t g_snapBefore[3][8192], g_snapAfter[3][8192];
 int g_pinMode = 0;  // shvi\pin_task.txt: 1 or 2
 
@@ -1093,6 +1179,22 @@ public:
                              hp.poolHits[2], heap >= 0 ? "heap " : "the current heap ", heap >= 0 ? heap : -1);
             }
         }
+        static std::atomic<int> gatesLogged{0};
+        if (g_heaps.imageBase && program == 0x48391B87u && offset == 0x18247u && argc >= 3 &&
+            gatesLogged.fetch_add(1) < 8) {  // the ped wrapper: why a creation would be refused
+            SpawnDiag d{};
+            bool okd = SehSpawnDiag(g_heaps.imageBase, args[0], &d);
+            float x = 0, y = 0, z = 0;
+            std::uint32_t xb = static_cast<std::uint32_t>(args[1]), yb = static_cast<std::uint32_t>(args[1] >> 32),
+                          zb = static_cast<std::uint32_t>(args[2]);
+            std::memcpy(&x, &xb, 4); std::memcpy(&y, &yb, 4); std::memcpy(&z, &zb, 4);
+            SHVI_LOG("gta6: ped creation gates%s: owner instance %u, model info %p type %u (without deny list %p type %u), "
+                     "ped pool %u / %u, at %.1f %.1f %.1f", okd ? "" : " (FAULT)", d.owner, reinterpret_cast<void*>(d.info),
+                     d.typeChecked, reinterpret_cast<void*>(d.infoAny), d.typeAny, d.pool24, d.pool28, x, y, z);
+            SHVI_LOG("gta6: ped creation owner check: TLS object %p, instance id %u -> %p, state %u, may-create rva 0x%llX -> %d",
+                     reinterpret_cast<void*>(d.tlsObj), d.id, reinterpret_cast<void*>(d.inst), d.state,
+                     static_cast<unsigned long long>(d.mayCreate ? d.mayCreate - g_heaps.imageBase : 0), d.mayCreateResult);
+        }
         std::uint32_t snapN[3] = {};
         HeapProbe hpPin{};
         if (g_pinMode && g_heaps.imageBase && SehProbeHeaps(g_heaps.imageBase, EngineTlsBlock(), &hpPin))
@@ -1126,6 +1228,45 @@ public:
             return SHVI_E_INVALID_ARG;
         }
         return SHVI_OK;
+    }
+
+    // ABI 1.7: a table-2 (strong) handle through the engine's own helper, owned by the current script instance.
+    int PinScriptObject(std::uint64_t object, std::uint64_t* pin) override {
+        if (!g_heaps.imageBase) return SHVI_E_UNSUPPORTED;
+        if (!t_tickThread) return SHVI_E_NOT_READY;
+        std::uintptr_t instance = 0;
+        if (!SehCurrentScriptInstance(EngineTlsBlock(), &instance) || !instance) return SHVI_E_NOT_READY;
+        std::lock_guard lock(g_pins.mu);
+        std::uint32_t i = 0;
+        while (i < ScriptPins::kSlots && g_pins.used[i]) ++i;
+        if (i == ScriptPins::kSlots) return SHVI_E_INVALID_ARG;
+        ScriptPins::Holder& h = g_pins.holders[i];
+        h = {};
+        bool ok = SehPinObject(g_heaps.imageBase, &h, object);
+        static std::atomic<int> logged{0};
+        if (logged.fetch_add(1) < 32)
+            SHVI_LOG("gta6: pin %p -> %s handle %08X instance %u reg %08X (slot %u)", reinterpret_cast<void*>(object),
+                     ok ? "ok" : "FAULT", h.w[0], h.w[1], h.w[2], i);
+        if (!ok || !h.w[0] || (h.w[0] & 0xF) != 2) {
+            if (ok && h.w[0]) SehUnpinObject(g_heaps.imageBase, &h);
+            return SHVI_E_INVALID_ARG;
+        }
+        g_pins.used[i] = true;
+        *pin = i + 1;
+        return SHVI_OK;
+    }
+    int UnpinScriptObject(std::uint64_t pin) override {
+        if (!g_heaps.imageBase) return SHVI_E_UNSUPPORTED;
+        if (!t_tickThread) return SHVI_E_NOT_READY;
+        if (pin == 0 || pin > ScriptPins::kSlots) return SHVI_E_INVALID_ARG;
+        std::lock_guard lock(g_pins.mu);
+        std::uint32_t i = static_cast<std::uint32_t>(pin - 1);
+        if (!g_pins.used[i]) return SHVI_E_INVALID_ARG;
+        bool ok = SehUnpinObject(g_heaps.imageBase, &g_pins.holders[i]);
+        g_pins.used[i] = false;
+        g_pins.holders[i] = {};
+        if (!ok) SHVI_LOG("gta6: unpin slot %u faulted", i);
+        return ok ? SHVI_OK : SHVI_E_INVALID_ARG;
     }
 
     // ABI 1.3 static_ptr (T2.4).
@@ -1216,8 +1357,12 @@ private:
         // around script_function_call; without the file the heaps are only logged.
         if (build_ == 1794606036u) {
             g_heaps.imageBase = exe.image.begin;
+            // Default heap 2: the pooled types the async creators allocate have regions in heaps 1 and 2, and
+            // heap 1 crashed the game in run 17; ped and object creation completed under heap 2 (2026-11-26).
             std::string m = ReadSmallFile(host.exeDir + L"\\shvi\\script_heap.txt");
+            g_heaps.mode = 2;
             if (m.rfind("auto", 0) == 0) g_heaps.mode = -1;
+            else if (m.rfind("off", 0) == 0) g_heaps.mode = -2;
             else if (!m.empty() && m[0] >= '0' && m[0] <= '2') g_heaps.mode = m[0] - '0';
             std::string pm = ReadSmallFile(host.exeDir + L"\\shvi\\pin_task.txt");
             if (!pm.empty() && (pm[0] == '1' || pm[0] == '2')) g_pinMode = pm[0] - '0';

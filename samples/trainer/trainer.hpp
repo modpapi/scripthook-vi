@@ -128,11 +128,22 @@ inline std::uint32_t HashName32(std::string_view s) {
     return h;
 }
 // "name" or "0xHEX" -> hash (a user list entry)
-inline std::uint32_t ParseHashEntry(const std::string& e) {
-    if (e.size() > 2 && e[0] == '0' && (e[1] == 'x' || e[1] == 'X')) return static_cast<std::uint32_t>(std::strtoul(e.c_str() + 2, nullptr, 16));
+inline std::uint64_t ParseHashEntry(const std::string& e) {
+    if (e.size() > 2 && e[0] == '0' && (e[1] == 'x' || e[1] == 'X')) return std::strtoull(e.c_str() + 2, nullptr, 16);
     return HashName32(e);
 }
 inline std::uint64_t PackXY(const Vec3& v) { return shvi_f2u(v.x) | (shvi_f2u(v.y) << 32); }
+
+// GTA VI model keys are 64 bits: the low half is the name's joaat, the high half a second hash (seen in game
+// 2026-11-26: the player's model is 0x6B13B6B43F959856; IS_MODEL_A_PED is 1 for it and 0 for 0x3F959856). The
+// generated wrappers type models as a 32-bit Hash and drop the high half, so model natives go through these.
+using ModelKey = std::uint64_t;
+inline ModelKey ModelOf(const Ref& r) {
+    return shvi::invoke<std::uint64_t>(shvi::sdk::EngineHash("GET_ENTITY_MODEL"), r.lo, r.hi);
+}
+inline bool ModelQuery(std::string_view native, ModelKey m) {
+    return (shvi::invoke<std::uint64_t>(shvi::sdk::EngineHash(native), m) & 0xFF) != 0;
+}
 
 // Async natives build a script Task before they do anything and take its type as their last argument:
 // a token for Task<T> in the calling script program's type space. A plugin is not a script program.
@@ -153,6 +164,10 @@ inline constexpr const char* kAsyncBlocked = "needs a script-side Task<T>: crash
 // heap +0x17D8) is not valid on the worker thread at tick time. Entering the engine's script scope first
 // is the likely fix; that path crashed on its first try and is now only fail-safe, not working.
 inline constexpr const char* kSpawnBlocked = "the ped is not created (flags zero) or the engine faults (script flags): runs 10-15";
+// What unblocked it (2026-11-26): the native registers its task under a weak GC handle, so the task was reclaimed
+// and the request died with it; ABI 1.7 script_object_pin holds a strong one. And the model must be the full
+// 64-bit key: with the 32-bit hash the creation fails its model check and completes at once with no entity.
+inline constexpr const char* kSpawnChecked = "2026-11-26: ped and object creation through the script wrappers completes with the new entity once the task is pinned (ABI 1.7) and the model is the full 64-bit key";
 
 enum class Category { Player, Weapons, Vehicle, Spawn, Teleport, Time, Weather, World, Misc, Count };
 inline const char* CategoryName(Category c) {
@@ -182,6 +197,8 @@ struct Feature {
     bool guess = false;              // an argument's meaning is assumed (GTA V analogy), not checked
     const char* blocked = nullptr;   // set when the feature is known not to work: never run, the label says why
     bool scriptCall = false;         // goes through a script function (ABI 1.6 script_function_call)
+    const char* checked = nullptr;   // confirmed by read-back in the running game (which run, what it showed):
+                                     // lifts "experimental" whatever the names' confidence
     // state
     bool on = false;
     int i = 0, imin = 0, imax = 0, istep = 1;
@@ -216,6 +233,8 @@ public:
         callScript_ = [](std::uint32_t prog, std::uint32_t off, const std::uint64_t* args, std::uint32_t argc, std::uint64_t* ret, std::uint32_t retc) {
             return shvi::script_function_call(prog, off, args, argc, ret, retc);
         };
+        pinScript_ = [](std::uint64_t obj, std::uint64_t* pin) { return shvi::script_object_pin(obj, pin); };
+        unpinScript_ = [](std::uint64_t pin) { return shvi::script_object_unpin(pin); };
         clock_ = [] {
             using namespace std::chrono;
             return static_cast<std::uint32_t>(duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
@@ -227,6 +246,9 @@ public:
     void SetClock(Clock c) { clock_ = std::move(c); }
     using ScriptCall = std::function<int(std::uint32_t, std::uint32_t, const std::uint64_t*, std::uint32_t, std::uint64_t*, std::uint32_t)>;
     void SetScriptCall(std::function<bool()> can, ScriptCall call) { canScriptCall_ = std::move(can); callScript_ = std::move(call); }
+    using PinFn = std::function<int(std::uint64_t, std::uint64_t*)>;
+    using UnpinFn = std::function<int(std::uint64_t)>;
+    void SetPin(PinFn pin, UnpinFn unpin) { pinScript_ = std::move(pin); unpinScript_ = std::move(unpin); }
 
     Settings settings;
     std::vector<Feature>& Features() { return features_; }
@@ -258,7 +280,7 @@ public:
                 f.missing += "script_function_call (host ABI 1.6)";
             }
             f.available = f.missing.empty() && haveCore_ && f.weakest != Conf::Denied && (!f.blocked || settings.runBlocked);
-            f.experimental = f.guess || f.scriptCall || static_cast<int>(f.weakest) > static_cast<int>(Conf::Inferred);
+            f.experimental = !f.checked && (f.guess || f.scriptCall || static_cast<int>(f.weakest) > static_cast<int>(Conf::Inferred));
         }
     }
     bool Usable(const Feature& f) const { return f.available && (!f.experimental || settings.allowExperimental); }
@@ -298,6 +320,7 @@ public:
         }
         if (settings.showStatus) UpdateStatus();
         CheckSpawnWatch();
+        StepRetry();
         StepCollectionScan();
     }
 
@@ -496,14 +519,14 @@ private:
     Vec3 Ahead(const Ctx& c) {
         return Add(A::GET_ENTITY_COORDS(c.ped, true), Mul(A::GET_ENTITY_FORWARD_VECTOR(c.ped), Find("spawn.distance")->f));
     }
-    std::uint32_t SelectedModel() {
+    ModelKey SelectedModel() {
         Feature* m = Find("spawn.model");
         if (models_.empty() || m->i < 0 || m->i >= static_cast<int>(models_.size())) return 0;
         return models_[static_cast<std::size_t>(m->i)];
     }
     // The 12-cell block exactly as the game's own initializer (native.func_00D151) and its caller leave it:
     // model +0x00, -1 +0x1C, position +0x20, heading +0x30, byte +0x3A = 1, byte +0x45 = 1, -1.0f +0x54.
-    void SpawnVehicle(const Ctx& c, std::uint32_t model) {
+    void SpawnVehicle(const Ctx& c, ModelKey model) {
         if (!model) { Log("trainer: no model selected"); return; }
         Vec3 p = Ahead(c);
         std::uint64_t b[12] = {};
@@ -524,9 +547,9 @@ private:
     //   func_01BE38(model, pos (2 cells), 2 flags, 1 cell, 2 flags, int, cancellation token) -> task (object)
     // The offsets are for build 1794606036. The flags' meaning is not known; they are left false.
     static constexpr std::uint32_t kNativeModule = 0x48391B87u, kCreatePedWrapper = 0x18247u, kCreateObjectWrapper = 0x1BE38u;
-    void LogScriptCall(const char* what, std::uint32_t model, int rc, std::uint64_t task) {
+    void LogScriptCall(const char* what, ModelKey model, int rc, std::uint64_t task) {
         char m[160];
-        std::snprintf(m, sizeof(m), "trainer: %s 0x%08X -> status %d, task 0x%llX", what, model, rc, static_cast<unsigned long long>(task));
+        std::snprintf(m, sizeof(m), "trainer: %s 0x%llX -> status %d, task 0x%llX", what, static_cast<unsigned long long>(model), rc, static_cast<unsigned long long>(task));
         Log(m);
         if (rc == SHVI_OK && task) DumpTask(task, "at return");
     }
@@ -584,10 +607,13 @@ private:
     }
     struct SpawnWatch {
         bool active = false;
-        std::uint32_t kind = 0, model = 0, until = 0, next = 0;
+        std::uint32_t kind = 0;
+        ModelKey model = 0;
+        std::uint32_t until = 0, next = 0;
         Vec3 pos{};
         int before = 0;
         std::uint64_t task = 0;  // the Task the wrapper returned; scripts read its result at +0x28 (native.func_00F428)
+        std::uint64_t pin = 0;   // ABI 1.7 pin that keeps the task alive while it is watched
         std::vector<Ref> known;  // every entity of that kind that existed before the request
         int newLogged = 0;
         int dumps = 0, changes = 0;
@@ -603,19 +629,20 @@ private:
     SpawnWatch watch_;
     Ref lastSpawned_{};
     Ref lastCharacter_{};
-    int CountModelNear(std::uint32_t kind, std::uint32_t model, const Vec3& pos, float radius) {
+    int CountModelNear(std::uint32_t kind, ModelKey model, const Vec3& pos, float radius) {
         if (!exists_("GET_ENTITY_MODEL") || !exists_("GET_ENTITY_COORDS")) return -1;
         std::vector<Ref> buf(512);
         int n = shvi::world_get_all(kind, buf.data(), static_cast<int>(buf.size()));
         int hits = 0;
         for (int i = 0; i < n && i < static_cast<int>(buf.size()); ++i) {
             const Ref& r = buf[static_cast<std::size_t>(i)];
-            if (!Valid(r) || A::GET_ENTITY_MODEL(r) != model) continue;
+            if (!Valid(r) || ModelOf(r) != model) continue;
             if (Dist2(A::GET_ENTITY_COORDS(r, false), pos) <= radius * radius) ++hits;
         }
         return hits;
     }
-    void StartSpawnWatch(std::uint32_t kind, std::uint32_t model, const Vec3& pos) {
+    void StartSpawnWatch(std::uint32_t kind, ModelKey model, const Vec3& pos) {
+        if (watch_.active) EndWatch();
         watch_ = SpawnWatch{true, kind, model, ctx_.nowMs + 90000, ctx_.nowMs + 1000, pos, CountModelNear(kind, model, pos, 30.0f)};
         watch_.known.resize(1024);
         int n = shvi::world_get_all(kind, watch_.known.data(), 1024);
@@ -634,11 +661,11 @@ private:
                 if (k.lo == r.lo && k.hi == r.hi) { old = true; break; }
             if (old) continue;
             watch_.known.push_back(r);
-            std::uint32_t mdl = A::GET_ENTITY_MODEL(r);
+            ModelKey mdl = ModelOf(r);
             if (mdl != watch_.model) continue;  // ambient entities come and go; only our model matters
             Vec3 at = A::GET_ENTITY_COORDS(r, true);
             char b[220];
-            std::snprintf(b, sizeof(b), "trainer: NEW entity with the requested model 0x%08X: %llX:%llX at %.1f %.1f %.1f (%.1f m from the request point)", mdl,
+            std::snprintf(b, sizeof(b), "trainer: NEW entity with the requested model 0x%llX: %llX:%llX at %.1f %.1f %.1f (%.1f m from the request point)", static_cast<unsigned long long>(mdl),
                           (unsigned long long)r.lo, (unsigned long long)r.hi, at.x, at.y, at.z, std::sqrt(Dist2(at, watch_.pos)));
             Log(b);
             lastSpawned_ = r;
@@ -657,8 +684,8 @@ private:
                 if (Valid(made)) {
                     char d[200];
                     Vec3 at = A::GET_ENTITY_COORDS(made, false);
-                    std::snprintf(d, sizeof(d), "trainer: task result %llX:%llX, model 0x%08X, at %.1f %.1f %.1f", (unsigned long long)made.lo,
-                                  (unsigned long long)made.hi, exists_("GET_ENTITY_MODEL") ? A::GET_ENTITY_MODEL(made) : 0, at.x, at.y, at.z);
+                    std::snprintf(d, sizeof(d), "trainer: task result %llX:%llX, model 0x%llX, at %.1f %.1f %.1f", (unsigned long long)made.lo,
+                                  (unsigned long long)made.hi, static_cast<unsigned long long>(ModelOf(made)), at.x, at.y, at.z);
                     Log(d);
                     lastSpawned_ = made;
                 }
@@ -670,13 +697,13 @@ private:
         char m[200];
         Ref made{};
         if (watch_.task && ReadTaskResult(watch_.task, &made) && Valid(made)) {
-            std::uint32_t mdl = exists_("GET_ENTITY_MODEL") ? A::GET_ENTITY_MODEL(made) : 0;
+            ModelKey mdl = ModelOf(made);
             Vec3 at = A::GET_ENTITY_COORDS(made, false);
-            std::snprintf(m, sizeof(m), "trainer: spawn confirmed by the task: reference %llX:%llX, model 0x%08X, at %.1f %.1f %.1f",
-                          static_cast<unsigned long long>(made.lo), static_cast<unsigned long long>(made.hi), mdl, at.x, at.y, at.z);
+            std::snprintf(m, sizeof(m), "trainer: spawn confirmed by the task: reference %llX:%llX, model 0x%llX, at %.1f %.1f %.1f",
+                          static_cast<unsigned long long>(made.lo), static_cast<unsigned long long>(made.hi), static_cast<unsigned long long>(mdl), at.x, at.y, at.z);
             Log(m);
             lastSpawned_ = made;
-            watch_.active = false;
+            EndWatch();
             return;
         }
         if (watch_.task && (watch_.dumps < 3 || watch_.dumps % 10 == 0)) {
@@ -688,17 +715,17 @@ private:
         }
         ++watch_.dumps;
         if (now > watch_.before) {
-            std::snprintf(m, sizeof(m), "trainer: spawn confirmed: %d entit%s of model 0x%08X near the spawn point (was %d)", now, now == 1 ? "y" : "ies",
-                          watch_.model, watch_.before);
+            std::snprintf(m, sizeof(m), "trainer: spawn confirmed: %d entit%s of model 0x%llX near the spawn point (was %d)", now, now == 1 ? "y" : "ies",
+                          static_cast<unsigned long long>(watch_.model), watch_.before);
             Log(m);
-            watch_.active = false;
+            EndWatch();
         } else if (ctx_.nowMs >= watch_.until) {
-            std::snprintf(m, sizeof(m), "trainer: spawn not seen after 90 s: %d of model 0x%08X near the spawn point (was %d)", now, watch_.model, watch_.before);
+            std::snprintf(m, sizeof(m), "trainer: spawn not seen after 90 s: %d of model 0x%llX near the spawn point (was %d)", now, static_cast<unsigned long long>(watch_.model), watch_.before);
             Log(m);
-            watch_.active = false;
+            EndWatch();
         }
     }
-    void SpawnPed(const Ctx& c, std::uint32_t model) {
+    void SpawnPed(const Ctx& c, ModelKey model) {
         if (!model) { Log("trainer: no model selected"); return; }
         Vec3 p = Ahead(c);
         StartSpawnWatch(SHVI_ENTITY_PED, model, p);
@@ -713,14 +740,71 @@ private:
         int rc = callScript_(kNativeModule, kCreatePedWrapper, a, 13, &task, 1);
         LogScriptCall("ped creation", model, rc, task);
         watch_.task = rc == SHVI_OK ? task : 0;
-        // Experiment (run 22): pooled script objects carry a 16-bit count at +0x10 that is 0 at creation
-        // (0x140EC2A50). If it is a reference count, holding one keeps the task past the owner's update.
-        if (watch_.task && settings.pinTask) {
-            BumpWord(task + 0x10);
-            DumpTask(task, "pinned");
+        if (FailedAtOnce(watch_.task)) { ScheduleRetry(true, model); return; }
+        retry_.active = false;
+        PinWatchedTask();
+    }
+    // A creation that fails one of the engine's gates (0x14115B2F0: no script instance that may own entities on
+    // this thread, model, pool) hands back a task that is already complete (status 5) with no entity. The owner
+    // depends on the script thread the tick borrowed, so the same request on a later tick can pass.
+    static bool FailedAtOnce(std::uint64_t task) {
+        std::uint64_t q[4] = {};
+        if (!task || !ReadWordsAt(task, q, 4)) return false;
+        Ref made{};
+        ReadTaskResult(task, &made);
+        return ((q[2] >> 16) & 0xFF) == 5 && !Valid(made);
+    }
+    struct Retry {
+        bool active = false, ped = true;
+        ModelKey model = 0;
+        int attempts = 0;
+        std::uint32_t next = 0;
+    };
+    Retry retry_;
+    void ScheduleRetry(bool ped, ModelKey model) {
+        if (!retry_.active || retry_.model != model || retry_.ped != ped) retry_ = Retry{true, ped, model, 0, 0};
+        if (++retry_.attempts > 30) {
+            Log("trainer: creation still refused after 30 tries (model, position or no owning script on any thread)");
+            retry_.active = false;
+            EndWatch();
+            return;
+        }
+        retry_.next = ctx_.nowMs + 100;
+        watch_.task = 0;
+        if (retry_.attempts == 1 || retry_.attempts % 10 == 0) {
+            char m[128];
+            std::snprintf(m, sizeof(m), "trainer: creation refused at once (try %d); trying again on a later tick", retry_.attempts);
+            Log(m);
         }
     }
-    void SpawnObject(const Ctx& c, std::uint32_t model) {
+    void StepRetry() {
+        if (!retry_.active || ctx_.nowMs < retry_.next || !Valid(ctx_.ped)) return;
+        if (retry_.ped) SpawnPed(ctx_, retry_.model);
+        else SpawnObject(ctx_, retry_.model);
+    }
+    // The async native registers its task under a weak handle, so the runtime reclaims it within frames and the
+    // request dies with it (runs 18-22, 58). A strong, script-owned pin (ABI 1.7) keeps it until the watch ends.
+    void PinWatchedTask() {
+        if (!watch_.task) return;
+        std::uint64_t pin = 0;
+        int rc = pinScript_(watch_.task, &pin);
+        watch_.pin = rc == SHVI_OK ? pin : 0;
+        char m[128];
+        std::snprintf(m, sizeof(m), "trainer: task 0x%llX pinned: status %d, pin %llu", static_cast<unsigned long long>(watch_.task), rc,
+                      static_cast<unsigned long long>(pin));
+        Log(m);
+    }
+    void EndWatch() {
+        watch_.active = false;
+        if (watch_.pin) {
+            int rc = unpinScript_(watch_.pin);
+            char m[96];
+            std::snprintf(m, sizeof(m), "trainer: task unpinned: status %d", rc);
+            Log(m);
+            watch_.pin = 0;
+        }
+    }
+    void SpawnObject(const Ctx& c, ModelKey model) {
         if (!model) { Log("trainer: no model selected"); return; }
         Vec3 p = Ahead(c);
         StartSpawnWatch(SHVI_ENTITY_OBJECT, model, p);
@@ -731,6 +815,10 @@ private:
         std::uint64_t task = 0;
         int rc = callScript_(kNativeModule, kCreateObjectWrapper, a, 10, &task, 1);
         LogScriptCall("object creation", model, rc, task);
+        watch_.task = rc == SHVI_OK ? task : 0;
+        if (FailedAtOnce(watch_.task)) { ScheduleRetry(false, model); return; }
+        retry_.active = false;
+        PinWatchedTask();
     }
 
     void UpdateStatus() {
@@ -883,12 +971,14 @@ private:
         Action(C::Player, "player.model", "Change player model: model selected in SPAWN",
                {"SET_PLAYER_MODEL", "GET_PLAYER_INDEX", "REQUEST_MODEL", "HAS_MODEL_LOADED", "IS_MODEL_VALID", "SET_MODEL_AS_NO_LONGER_NEEDED"},
                [this](Ctx&, Feature&) {
-                   std::uint32_t model = SelectedModel();
-                   if (!model || !A::IS_MODEL_VALID(model)) { Log("trainer: model not valid"); return; }
-                   A::REQUEST_MODEL(model, false);
-                   for (int i = 0; i < 200 && !A::HAS_MODEL_LOADED(model); ++i) shvi::wait(0);
-                   if (A::HAS_MODEL_LOADED(model)) A::SET_PLAYER_MODEL(A::GET_PLAYER_INDEX(), model, false);
-                   A::SET_MODEL_AS_NO_LONGER_NEEDED(model);
+                   ModelKey model = SelectedModel();
+                   using shvi::invoke;
+                   using shvi::sdk::EngineHash;
+                   if (!model || !ModelQuery("IS_MODEL_VALID", model)) { Log("trainer: model not valid (models are 64-bit keys)"); return; }
+                   invoke<void>(EngineHash("REQUEST_MODEL"), model, false);
+                   for (int i = 0; i < 200 && !ModelQuery("HAS_MODEL_LOADED", model); ++i) shvi::wait(0);
+                   if (ModelQuery("HAS_MODEL_LOADED", model)) invoke<void>(EngineHash("SET_PLAYER_MODEL"), A::GET_PLAYER_INDEX(), model, false);
+                   invoke<void>(EngineHash("SET_MODEL_AS_NO_LONGER_NEEDED"), model);
                }).guess = true;  // GTA V's sequence; VI's extra flag arguments are left false
 
         Toggle(C::Player, "player.breath", "Unlimited breath underwater", {"SET_PED_MAX_TIME_UNDERWATER", "SET_PED_MAX_TIME_IN_WATER"}, Hold::Interval,
@@ -1136,18 +1226,18 @@ private:
                        auto v = Nearby(c, SHVI_ENTITY_VEHICLE, 100.0f, true);
                        if (!v.empty()) src = v.front();
                    }
-                   if (Valid(src)) SpawnVehicle(c, A::GET_ENTITY_MODEL(src));
+                   if (Valid(src)) SpawnVehicle(c, ModelOf(src));
                    else Log("trainer: no vehicle to copy");
                }).blocked = kAsyncBlocked;
         { Feature& sf = Action(C::Spawn, "spawn.ped", "Spawn ped: listed model", {"GET_ENTITY_COORDS", "GET_ENTITY_FORWARD_VECTOR", "GET_ENTITY_HEADING"},
-               [this](Ctx& c, Feature&) { SpawnPed(c, SelectedModel()); }); sf.scriptCall = true; sf.blocked = kSpawnBlocked; }
+               [this](Ctx& c, Feature&) { SpawnPed(c, SelectedModel()); }); sf.scriptCall = true; sf.checked = kSpawnChecked; }
         { Feature& sf = Action(C::Spawn, "spawn.pedcopy", "Spawn ped: same model as nearest",
                {"GET_ENTITY_MODEL", "GET_ENTITY_COORDS", "GET_ENTITY_FORWARD_VECTOR", "GET_ENTITY_HEADING"},
                [this](Ctx& c, Feature&) {
                    auto v = Nearby(c, SHVI_ENTITY_PED, 100.0f, true);
-                   if (!v.empty()) SpawnPed(c, A::GET_ENTITY_MODEL(v.front()));
+                   if (!v.empty()) SpawnPed(c, ModelOf(v.front()));
                    else Log("trainer: no ped to copy");
-               }); sf.scriptCall = true; sf.blocked = kSpawnBlocked; }
+               }); sf.scriptCall = true; sf.checked = kSpawnChecked; }
         // Story characters ("persistent characters") have synchronous natives: no Task, so none of the async
         // spawn problems. Flow as in shipped scripts: handle by character hash, force the spawn, take the ped.
         // The names are the guide's (RDR2-style) and unverified: experimental through their confidence.
@@ -1217,15 +1307,15 @@ private:
             if (Valid(lastCharacter_)) A::_FORCE_DESPAWN_PERSCHAR(lastCharacter_);
         });
         { Feature& sf = Action(C::Spawn, "spawn.clone", "Spawn ped: same model as player", {"GET_ENTITY_MODEL", "GET_ENTITY_COORDS", "GET_ENTITY_FORWARD_VECTOR", "GET_ENTITY_HEADING"},
-               [this](Ctx& c, Feature&) { SpawnPed(c, A::GET_ENTITY_MODEL(c.ped)); }); sf.scriptCall = true; sf.blocked = kSpawnBlocked; }
+               [this](Ctx& c, Feature&) { SpawnPed(c, ModelOf(c.ped)); }); sf.scriptCall = true; sf.checked = kSpawnChecked; }
         { Feature& sf = Action(C::Spawn, "spawn.object", "Spawn object: listed model", {"GET_ENTITY_COORDS", "GET_ENTITY_FORWARD_VECTOR"},
-               [this](Ctx& c, Feature&) { SpawnObject(c, SelectedModel()); }); sf.scriptCall = true; sf.blocked = kSpawnBlocked; }
+               [this](Ctx& c, Feature&) { SpawnObject(c, SelectedModel()); }); sf.scriptCall = true; sf.checked = kSpawnChecked; }
         { Feature& sf = Action(C::Spawn, "spawn.objectcopy", "Spawn object: same model as nearest", {"GET_ENTITY_MODEL", "GET_ENTITY_COORDS", "GET_ENTITY_FORWARD_VECTOR"},
                [this](Ctx& c, Feature&) {
                    auto v = Nearby(c, SHVI_ENTITY_OBJECT, 60.0f, true);
-                   if (!v.empty()) SpawnObject(c, A::GET_ENTITY_MODEL(v.front()));
+                   if (!v.empty()) SpawnObject(c, ModelOf(v.front()));
                    else Log("trainer: no object to copy");
-               }); sf.scriptCall = true; sf.blocked = kSpawnBlocked; }
+               }); sf.scriptCall = true; sf.checked = kSpawnChecked; }
         Action(C::Spawn, "spawn.deletepeds", "Delete nearby peds", {"DELETE_PED", "SET_ENTITY_AS_MISSION_ENTITY", "GET_ENTITY_COORDS"}, [this](Ctx& c, Feature&) {
             for (Ref p : Nearby(c, SHVI_ENTITY_PED, Find("world.radius")->f, true)) {
                 A::SET_ENTITY_AS_MISSION_ENTITY(p, true, true);
@@ -1473,8 +1563,8 @@ private:
         });
         Action(C::Misc, "misc.logmodel", "Log model of player and vehicle", {"GET_ENTITY_MODEL"}, [](Ctx& c, Feature&) {
             char b[128];
-            std::snprintf(b, sizeof(b), "trainer: ped model 0x%08X, vehicle model 0x%08X", A::GET_ENTITY_MODEL(c.ped),
-                          c.inVehicle ? A::GET_ENTITY_MODEL(c.veh) : 0u);
+            std::snprintf(b, sizeof(b), "trainer: ped model 0x%llX, vehicle model 0x%llX (64-bit keys: use these in trainer_models.txt)",
+                          static_cast<unsigned long long>(ModelOf(c.ped)), static_cast<unsigned long long>(c.inVehicle ? ModelOf(c.veh) : 0));
             Log(b);
         });
         Action(C::Misc, "misc.character", "Log current character", {"VI_GET_PLAYER_CHARACTER_HASH", "GET_PLAYER_INDEX"}, [](Ctx&, Feature&) {
@@ -1663,13 +1753,15 @@ private:
         bool used = false;
     };
     std::vector<Feature> features_;
-    std::vector<std::uint32_t> models_;
+    std::vector<ModelKey> models_;
     Slot slots_[kSlots]{};
     Ctx ctx_;
     Exists exists_;
     Clock clock_;
     std::function<bool()> canScriptCall_;
     ScriptCall callScript_;
+    PinFn pinScript_;
+    UnpinFn unpinScript_;
     std::string status_;
     std::uint32_t lastTick_ = 0;
     float noclipInput_ = 0.0f;
