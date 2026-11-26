@@ -13,13 +13,14 @@ void DrawList::AddRect(float x, float y, float w, float h, std::uint32_t rgba) {
     back_.push_back(std::move(it));
 }
 
-void DrawList::AddText(std::string_view text, float x, float y, float scale, std::uint32_t rgba, int align) {
+void DrawList::AddText(std::string_view text, float x, float y, float scale, std::uint32_t rgba, int align, int font) {
     DrawItem it;
     it.kind = DrawItem::Kind::Text;
     it.x = x, it.y = y;
     it.rgba = rgba;
     it.scale = scale;
     it.align = align;
+    it.font = font >= 0 && font < kFontCount ? font : kFontRegular;
     it.text.assign(text);
     back_.push_back(std::move(it));
 }

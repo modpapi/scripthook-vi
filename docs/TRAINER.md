@@ -24,13 +24,15 @@ only has to implement `ui::Backend::Draw`.
 Each feature lists the natives it calls. Nothing is called on trust:
 
 1. **Bound?** `Trainer::Refresh()` asks the host for every needed name (`native_exists`, ABI 1.5). A
-   feature with a missing native is shown as `[n/a]` and does nothing. With the default native table
+   feature with a missing native is shown dimmed with an `N/A` badge and does nothing; the footer
+   names what it needs. With the default native table
    (43 behaviour-checked names) only a handful are available; with
    `nativedb/db/<build>/native_table_full.json` installed, all 181 are bound (seen in game).
 2. **Trusted?** The weakest name confidence among its natives decides. A feature is *experimental* when
    that is `guide`, `inferred-medium` or `guide-order-conflict`, or when the code marks an argument as a
-   guess (`guess = true`). Experimental features show as `[locked]` until "Allow experimental natives"
-   is switched on in Settings, then as `[exp]`.
+   guess (`guess = true`). Experimental features carry a `LOCKED` badge until "Allow experimental
+   features" is switched on in Settings, then an `EXP` badge. A feature blocked for a known fault
+   shows `BLOCKED`.
 3. **Held.** A toggle is re-applied every frame (`Hold::Frame`) or every `reapplyMs` (`Hold::Interval`,
    default 750 ms), because game scripts set the same state. Switching it off applies the off value once.
 

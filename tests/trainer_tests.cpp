@@ -311,11 +311,15 @@ void TestMenuBuilds() {
     shvi::ui::Style st;
     auto list = menu.Layout(st);
     CHECK(!list.empty());
-    bool sawPlayer = false;
-    for (auto& d : list) sawPlayer = sawPlayer || d.text.rfind("PLAYER  (", 0) == 0;
-    CHECK(sawPlayer);
-    // open the first page and toggle its first item through the menu
+    bool sawPlayer = false, sawCount = false;
+    for (auto& d : list) {
+        sawPlayer = sawPlayer || d.text == "Player";
+        sawCount = sawCount || (d.text.find('/') != std::string::npos && d.text.find(' ') == std::string::npos);  // the "usable/total" tag
+    }
+    CHECK(sawPlayer && sawCount);
+    // open the first page (its first row is a section heading) and toggle its first item through the menu
     menu.Handle(shvi::ui::Action::Select);
+    CHECK(menu.Current().Items()[0].kind == shvi::ui::Item::Section && menu.Cursor() == 1);
     menu.Handle(shvi::ui::Action::Select);
     CHECK(fx.t.Find("player.god")->on && Count("SET_ENTITY_INVINCIBLE") == 1);
 }

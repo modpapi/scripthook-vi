@@ -107,13 +107,13 @@ The mod developer guide is [docs/SDK.md](docs/SDK.md).
     <td width="33%"><img src="assets/trainer-time.jpg" alt="Trainer time page"></td>
   </tr>
   <tr>
-    <td align="center"><b>Player</b>: 46 features; <code>[locked]</code> ones wait for a stronger native name</td>
-    <td align="center"><b>Vehicle</b>: 34 features</td>
+    <td align="center"><b>Player</b>: 46 features in sections; <code>LOCKED</code> ones wait for a stronger native name</td>
+    <td align="center"><b>Vehicle</b>: 34 features, grouped by condition, driving, handling…</td>
     <td align="center"><b>Time</b>: clock, presets, game speed</td>
   </tr>
 </table>
 
-Captured on 2026-11-26 (Xbox exe 1.0.2.1 under p1nkman-VI `9aaa9ec`, RTX 3050 Laptop, 1920×1080, a few fps).
+Captured on 2026-11-26 (Xbox exe 1.0.2.1 under the VIctory-based layer, RTX 3090, 1920×1080, about 20 fps).
 The menu, the overlay and the coordinate line at the top left come from ScriptHook VI and the sample
 trainer. The root page counts the features bound for this build in each category: in that run 171 of
 181 were available, 51 of them experimental. The menu was opened with F4 and driven by keyboard.
@@ -184,7 +184,7 @@ Legend: ✅ done and verified in game · 🧪 done, unit-tested, not yet confirm
 | Native census of the exe | ✅ | 6,829 handlers, matched against an independent IDA census with nothing unexplained |
 | Typed NativeDB (`natives.json`, alloc8or layout) | ✅ | All 6,829 typed; 2,034 named with a confidence level; names checked by code-layout order |
 | Generated C++ wrappers `natives_full.hpp` | ✅ | 6,823 wrappers, `shvi::nativedb::<NS>::<NAME>` |
-| Sample trainer (`samples/trainer`) | ✅ / 🚧 | 181 features in 9 categories; a few dozen confirmed in game by read-back, most others bound but not yet checked |
+| Sample trainer (`samples/trainer`) | ✅ / 🚧 | 181 features in 9 categories, sectioned menu with status badges; 176 usable, 44 still experimental; confirmed features are marked in the code with what the read-back showed |
 | Sample menu (`samples/menu_demo`), C sample (`samples/hello_engine`) | ✅ | `hello_engine` calls the game's string hash in game and matches the SDK |
 | Script inventory (logs every linked program) | ✅ | |
 | Script function hooks (in-VM detours) | 📐 | `docs/SCRIPT_MODDING.md` |

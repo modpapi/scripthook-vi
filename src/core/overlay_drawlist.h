@@ -22,8 +22,12 @@ struct DrawItem {
     std::uint32_t rgba = 0;             // vi::PackRgba layout: r<<24 | g<<16 | b<<8 | a
     float scale = 0.35f;
     int align = 0;                      // 0 left, 1 centre, 2 right
+    int font = 0;                       // kFont* below; anything else draws with the regular face
     std::string text;
 };
+
+// Faces the overlay loads (from the system font folder; the built-in font when a file is missing).
+inline constexpr int kFontRegular = 0, kFontBold = 1, kFontDisplay = 2, kFontCount = 3;
 using Frame = std::vector<DrawItem>;
 
 class DrawList {
@@ -31,7 +35,7 @@ public:
     DrawList();
     // Producer side (one thread).
     void AddRect(float x, float y, float w, float h, std::uint32_t rgba);
-    void AddText(std::string_view text, float x, float y, float scale, std::uint32_t rgba, int align);
+    void AddText(std::string_view text, float x, float y, float scale, std::uint32_t rgba, int align, int font = kFontRegular);
     void Publish();  // back -> front, back cleared
     void Clear();    // publish an empty frame and drop pending back items
     // Consumer side (any thread).

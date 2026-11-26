@@ -61,11 +61,110 @@ std::vector<AutoStep> LoadAutorun(const std::string& shviDir) {
     return steps;
 }
 
+// One autorun or command step: a feature id with an optional value, or a settings pseudo step. Logs what it did.
+void RunStep(trainer::Trainer& t, const std::string& id, const std::string& arg, const char* when) {
+    char b[320];
+    if (id == "settings.experimental") {
+        t.settings.allowExperimental = arg != "off";
+        t.Refresh();
+        std::snprintf(b, sizeof(b), "trainer: %s experimental features %s", when, t.settings.allowExperimental ? "allowed" : "locked");
+        shvi::api()->log(b);
+        return;
+    }
+    if (id == "settings.pintask") { t.settings.pinTask = arg != "off"; return; }
+    if (id == "settings.runblocked") {
+        t.settings.runBlocked = arg != "off";
+        t.Refresh();
+        std::snprintf(b, sizeof(b), "trainer: %s blocked features %s", when, t.settings.runBlocked ? "allowed" : "off");
+        shvi::api()->log(b);
+        return;
+    }
+    trainer::Feature* f = t.Find(id);
+    if (!f) {
+        std::snprintf(b, sizeof(b), "trainer: %s %s: no such feature", when, id.c_str());
+        shvi::api()->log(b);
+        return;
+    }
+    if (f->kind == trainer::Kind::Toggle) f->on = arg != "off";
+    else if ((f->kind == trainer::Kind::Int || f->kind == trainer::Kind::Choice) && !arg.empty()) f->i = std::atoi(arg.c_str());
+    else if (f->kind == trainer::Kind::Float && !arg.empty()) f->f = static_cast<float>(std::atof(arg.c_str()));
+    bool ok = t.Activate(*f);
+    std::snprintf(b, sizeof(b), "trainer: %s %s %s -> %s%s%s", when, id.c_str(), arg.c_str(), ok ? "called" : "refused",
+                  f->available ? "" : " missing ", f->available ? "" : f->missing.c_str());
+    shvi::api()->log(b);
+}
+
+// "call NAME arg..." in a command file: one native by name, for read-backs while testing a feature. Arguments:
+// ped / veh (the player's ped or vehicle, two cells), i:N, u:HEX, f:X, b:0|1. Logs the first two return cells.
+void CallNative(trainer::Trainer& t, const std::string& line) {
+    char name[96] = {};
+    int used = 0;
+    if (std::sscanf(line.c_str(), "call %95s%n", name, &used) < 1) return;
+    const shvi_api* a = shvi::api();
+    std::uint64_t hash = shvi_engine_hash(name);
+    char b[320];
+    if (!a->native_exists || !a->native_exists(hash)) {
+        std::snprintf(b, sizeof(b), "trainer: call %s: not bound", name);
+        a->log(b);
+        return;
+    }
+    a->native_init(hash);
+    const char* p = line.c_str() + used;
+    for (char tok[64]; std::sscanf(p, "%63s%n", tok, &used) == 1; p += used) {
+        std::string s = tok;
+        const auto& c = t.Context();
+        if (s == "ped" || s == "veh") {
+            const trainer::Ref& r = s == "ped" ? c.ped : c.veh;
+            a->native_push64(r.lo);
+            a->native_push64(r.hi);
+        } else if (s.rfind("i:", 0) == 0) a->native_push64(static_cast<std::uint64_t>(static_cast<std::int64_t>(std::atoll(s.c_str() + 2))));
+        else if (s.rfind("u:", 0) == 0) a->native_push64(std::strtoull(s.c_str() + 2, nullptr, 16));
+        else if (s.rfind("f:", 0) == 0) a->native_push64(shvi_f2u(static_cast<float>(std::atof(s.c_str() + 2))));
+        else if (s.rfind("b:", 0) == 0) a->native_push64(std::atoi(s.c_str() + 2) ? 1 : 0);
+    }
+    const std::uint64_t* r = a->native_call();
+    std::snprintf(b, sizeof(b), "trainer: call %s -> 0x%llX 0x%llX (as float %.3f, as int %d)", line.c_str() + 5, (unsigned long long)r[0],
+                  (unsigned long long)r[1], shvi_u2f(r[0]), static_cast<int>(static_cast<std::int32_t>(r[0])));
+    a->log(b);
+}
+
+// Commands for a test run: shvi\trainer_cmd.txt, one "<feature id> [on|off|number]" per line, read and deleted
+// when it appears. "wait <ms>" pauses between lines; "call ..." calls a native (CallNative). Nothing happens while
+// the file does not exist.
+struct CommandFile {
+    std::string path;
+    std::vector<std::pair<std::string, std::string>> queue;
+    std::uint32_t lastPoll = 0, resumeAt = 0;
+    void Step(trainer::Trainer& t, std::uint32_t now) {
+        if (queue.empty() && now - lastPoll > 500) {
+            lastPoll = now;
+            std::ifstream in(path);
+            if (!in) return;
+            for (std::string line; std::getline(in, line);) {
+                while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+                if (line.empty() || line[0] == '#') continue;
+                char id[96] = {}, arg[64] = {};
+                if (line.rfind("call ", 0) == 0) queue.emplace_back("call", line);
+                else if (std::sscanf(line.c_str(), "%95s %63s", id, arg) >= 1) queue.emplace_back(id, arg);
+            }
+            in.close();
+            std::remove(path.c_str());
+        }
+        while (!queue.empty() && now >= resumeAt) {
+            auto [id, arg] = queue.front();
+            queue.erase(queue.begin());
+            if (id == "wait") { resumeAt = now + static_cast<std::uint32_t>(std::atoi(arg.c_str())); return; }
+            if (id == "call") { CallNative(t, arg); continue; }
+            RunStep(t, id, arg, "cmd");
+        }
+    }
+};
+
 void ScriptMain(void*) {
     using namespace shvi;
     trainer::Trainer t;
     ui::Style style;
-    style.maxVisible = 14;
+    style.maxVisible = 16;
     vi::EngineBackend backend;
 
     // The shvi folder, from this plugin's own path (<game>\shvi\plugins\trainer.asi, or /data/shvi/ on
@@ -88,6 +187,8 @@ void ScriptMain(void*) {
     }
 
     std::vector<AutoStep> autorun = LoadAutorun(shviDir);
+    CommandFile commands;
+    commands.path = shviDir + "trainer_cmd.txt";
     std::uint32_t worldSince = 0, lastStatusLog = 0;
     if (!autorun.empty()) {
         char b[96];
@@ -112,8 +213,10 @@ void ScriptMain(void*) {
             for (auto& f : t.Features()) usable += t.Usable(f) ? 1 : 0;
             if (!built || usable != lastUsable || lastExperimental != t.settings.allowExperimental) {
                 bool wasOpen = built && menu->IsOpen();
+                std::vector<int> path = built ? menu->Path() : std::vector<int>{};
                 menu = std::make_unique<ui::Menu>("VI TRAINER");
                 t.BuildMenu(*menu);
+                menu->RestorePath(path);
                 menu->SetOpen(wasOpen);
                 if (usable != lastUsable) t.LogAvailability();
                 lastUsable = usable;
@@ -138,35 +241,12 @@ void ScriptMain(void*) {
             for (auto& st : autorun) {
                 if (st.done || secs < st.at) continue;
                 st.done = true;
-                char b[320];
-                if (st.id == "settings.experimental") {  // pseudo step: the Settings switch
-                    t.settings.allowExperimental = st.arg != "off";
-                    t.Refresh();
-                    api()->log(t.settings.allowExperimental ? "trainer: autorun experimental natives allowed" : "trainer: autorun experimental natives locked");
-                    continue;
-                }
-                if (st.id == "settings.pintask") { t.settings.pinTask = st.arg != "off"; continue; }
-                if (st.id == "settings.runblocked") {  // pseudo step: retry features the trainer has blocked
-                    t.settings.runBlocked = st.arg != "off";
-                    t.Refresh();
-                    api()->log(t.settings.runBlocked ? "trainer: autorun blocked features allowed" : "trainer: autorun blocked features off");
-                    continue;
-                }
-                trainer::Feature* f = t.Find(st.id);
-                if (!f) {
-                    std::snprintf(b, sizeof(b), "trainer: autorun %s: no such feature", st.id.c_str());
-                    api()->log(b);
-                    continue;
-                }
-                if (f->kind == trainer::Kind::Toggle) f->on = st.arg != "off";
-                else if ((f->kind == trainer::Kind::Int || f->kind == trainer::Kind::Choice) && !st.arg.empty()) f->i = std::atoi(st.arg.c_str());
-                else if (f->kind == trainer::Kind::Float && !st.arg.empty()) f->f = static_cast<float>(std::atof(st.arg.c_str()));
-                bool ok = t.Activate(*f);
-                std::snprintf(b, sizeof(b), "trainer: autorun t=%.0fs %s %s -> %s%s%s", secs, st.id.c_str(), st.arg.c_str(),
-                              ok ? "called" : "refused", f->available ? "" : " missing ", f->available ? "" : f->missing.c_str());
-                api()->log(b);
+                char when[32];
+                std::snprintf(when, sizeof(when), "autorun t=%.0fs", secs);
+                RunStep(t, st.id, st.arg, when);
             }
         }
+        if (trainer::Valid(t.Context().ped)) commands.Step(t, now);
 
         for (ui::Action a; (a = g_input.Pop()) != ui::Action::None;) {
             menu->Handle(a);
@@ -184,14 +264,27 @@ void ScriptMain(void*) {
         }
         if (menu->IsOpen()) vi::DisableMenuControls();
 
-        if (t.settings.showStatus && !t.Status().empty()) {
-            ui::DrawCmd d;
+        if (t.settings.showStatus && !t.Status().empty()) {  // a small dark pill at the top left
+            ui::DrawCmd bg, d;
             d.kind = ui::DrawCmd::Text;
             d.text = t.Status();
-            d.x = 0.01f;
-            d.y = 0.01f;
-            d.scale = 0.34f;
-            d.color = {255, 255, 255, 255};
+            d.scale = 0.25f;
+            d.font = ui::font::Bold;
+            d.color = {235, 235, 240, 255};
+            const float padX = 0.006f, h = 0.026f;
+            bg.kind = ui::DrawCmd::Rect;
+            bg.x = 0.008f;
+            bg.y = 0.010f;
+            bg.w = ui::TextWidth(d.text, d.scale, d.font, style) + 2 * padX;
+            bg.h = h;
+            bg.color = {0, 0, 0, 170};
+            d.x = bg.x + padX;
+            d.y = bg.y + (h - d.scale * style.textHeight) * 0.5f;
+            ui::DrawCmd edge = bg;
+            edge.w = 0.0018f;
+            edge.color = style.accent;
+            backend.Draw(bg);
+            backend.Draw(edge);
             backend.Draw(d);
         }
         ui::Submit(backend, menu->Layout(style));

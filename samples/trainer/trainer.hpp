@@ -349,9 +349,111 @@ public:
         return Activate(*f);
     }
 
+    // Menu order: each category's features under section headings (kSections), in that order; features the
+    // table does not name follow at the end under "More". The pair's section is set on a group's first feature.
+    std::vector<std::pair<const char*, Feature*>> Ordered(Category cat) {
+        struct Group { Category cat; const char* title; std::vector<const char*> ids; };
+        using C = Category;
+        static const std::vector<Group> kSections = {
+            {C::Player, "Health", {"player.god", "player.heal", "player.autoheal", "player.maxhealth", "player.regen", "player.vitals",
+                                   "player.keepvitals", "player.vitalindex", "player.vitalvalue", "player.nodamage", "player.proofs",
+                                   "player.onlyplayerdamage", "player.noragdoll", "player.suicide"}},
+            {C::Player, "Wanted level", {"player.clearwanted", "player.neverwanted", "player.setwanted", "player.maxwanted",
+                                         "player.wantedoff", "player.ignored", "player.policeignore"}},
+            {C::Player, "Abilities", {"player.stamina", "player.breath", "player.ability", "player.abilitycharge", "player.abilityfull",
+                                      "player.abilityreset", "player.abilityoff", "player.accuracy"}},
+            {C::Player, "Movement", {"player.moverate", "player.fastrun", "player.autowalk", "player.jump", "player.launch", "player.freeze",
+                                     "player.nogravity", "player.entitygravity", "player.nocollision"}},
+            {C::Player, "Appearance", {"player.invisible", "player.alpha", "player.model", "player.sweat", "player.clean", "player.extinguish"}},
+            {C::Player, "Story", {"player.bringsecond", "player.stoptasks"}},
+            {C::Weapons, "Ammo", {"weapon.infclip", "weapon.refill", "weapon.autorefill", "weapon.fillclip", "weapon.ammotype",
+                                  "weapon.setammo", "weapon.removeammo"}},
+            {C::Weapons, "Weapons", {"weapon.collection", "weapon.bestcollection", "weapon.equip", "weapon.givecount", "weapon.give",
+                                     "weapon.giveall", "weapon.drop", "weapon.hide", "weapon.keepdrop"}},
+            {C::Vehicle, "Condition", {"veh.repair", "veh.autorepair", "veh.god", "veh.clean", "veh.fixtyres", "veh.bursttyres",
+                                       "veh.extinguish", "veh.explode", "veh.delete"}},
+            {C::Vehicle, "Driving", {"veh.engine", "veh.boostspeed", "veh.boost", "veh.stop", "veh.power", "veh.maxspeed", "veh.steerbias",
+                                     "veh.handbrake", "veh.burnout", "veh.flip", "veh.launch", "veh.nogravity", "veh.seatbelt"}},
+            {C::Vehicle, "Lights and doors", {"veh.lights", "veh.fullbeam", "veh.hazards", "veh.interiorlight", "veh.alarm", "veh.locks",
+                                              "veh.opendoors", "veh.closedoors", "veh.breakdoors"}},
+            {C::Spawn, "Story characters", {"spawn.character", "spawn.charspawn", "spawn.charlist", "spawn.charinfo", "spawn.charbring",
+                                            "spawn.chardespawn"}},
+            {C::Spawn, "Models", {"spawn.model", "spawn.distance", "spawn.vehicle", "spawn.vehiclecopy", "spawn.ped", "spawn.pedcopy",
+                                  "spawn.clone", "spawn.object", "spawn.objectcopy"}},
+            {C::Spawn, "Clean up", {"spawn.deletepeds", "spawn.deletevehicles"}},
+            {C::Teleport, "Quick", {"teleport.tosecond", "tp.waypoint", "tp.clearwaypoint", "tp.step", "tp.forward", "tp.up", "tp.down",
+                                    "tp.noclip", "tp.heading"}},
+            {C::Teleport, "Saved positions", {"tp.slot", "tp.save", "tp.load"}},
+            {C::Teleport, "Coordinates", {"tp.x", "tp.y", "tp.z", "tp.fill", "tp.go", "tp.streamed", "tp.streamedstop"}},
+            {C::World, "Population", {"world.traffic", "world.holdtraffic", "world.peds", "world.holdpeds", "world.holdambient",
+                                      "world.flee", "world.nocops", "world.notrains", "world.noboats"}},
+            {C::World, "Nearby", {"world.radius", "world.cleararea", "world.killpeds", "world.freezepeds", "world.deletepeds",
+                                  "world.deletevehicles", "world.explodevehicles", "world.repairvehicles", "world.launchvehicles",
+                                  "world.stopfires"}},
+            {C::World, "Physics", {"world.explosiontype", "world.explosion", "world.gravity", "world.pause"}},
+            {C::Misc, "Screen and sound", {"misc.camshake", "misc.stopshake", "misc.clearfx", "misc.tcstrength", "misc.radionext"}},
+            {C::Misc, "Logging", {"misc.logpos", "misc.logmodel", "misc.character", "misc.probe", "misc.counts"}},
+        };
+        std::vector<std::pair<const char*, Feature*>> out;
+        std::vector<const Feature*> placed;
+        bool anyGroup = false;
+        for (const Group& g : kSections) {
+            if (g.cat != cat) continue;
+            const char* head = g.title;
+            for (const char* id : g.ids) {
+                Feature* f = Find(id);
+                if (!f || f->cat != cat) continue;
+                out.emplace_back(head, f);
+                placed.push_back(f);
+                head = nullptr;
+                anyGroup = true;
+            }
+        }
+        const char* head = anyGroup ? "More" : nullptr;
+        for (auto& f : features_) {
+            if (f.cat != cat || std::find(placed.begin(), placed.end(), &f) != placed.end()) continue;
+            out.emplace_back(head, &f);
+            head = nullptr;
+        }
+        return out;
+    }
+
+    // The badge a menu row shows for a feature that is not plain usable, and its colour.
+    static constexpr shvi::ui::Color kTagExp{217, 119, 6, 235}, kTagLocked{120, 85, 20, 235}, kTagBlocked{200, 40, 50, 235},
+        kTagNa{70, 70, 80, 235}, kTagCount{255, 255, 255, 34};
+    std::string Tag(const Feature& f) const {
+        if (f.blocked && !settings.runBlocked) return "BLOCKED";
+        if (!f.available) return "N/A";
+        if (f.experimental) return settings.allowExperimental ? "EXP" : "LOCKED";
+        return {};
+    }
+    shvi::ui::Color TagColor(const Feature& f) const {
+        if (f.blocked && !settings.runBlocked) return kTagBlocked;
+        if (!f.available) return kTagNa;
+        return settings.allowExperimental ? kTagExp : kTagLocked;
+    }
+    // The footer line for a feature: why it is unavailable, or what to expect.
+    std::string Hint(const Feature& f) const {
+        if (f.blocked && !settings.runBlocked) return std::string("Blocked: ") + f.blocked;
+        if (!f.available) return f.missing.empty() ? "Not available in this build" : "Needs " + f.missing;
+        if (f.experimental && !settings.allowExperimental) return "Experimental: allow it in Settings";
+        if (f.experimental) return std::string("Experimental: ") + (f.guess ? "an argument is assumed" : "native names are unconfirmed");
+        return {};
+    }
+
     // One page per category plus settings. Call after Refresh(); call again to rebuild labels.
     void BuildMenu(shvi::ui::Menu& menu) {
         using shvi::ui::Page;
+        static const char* const kTitles[] = {"Player", "Weapons", "Vehicle", "Spawn", "Teleport", "Time", "Weather", "World", "Misc"};
+        static const char* const kHints[] = {"Health, wanted level, abilities, movement",
+                                             "Ammo, weapon collections, equip",
+                                             "The vehicle you are in: repair, handling, lights, doors",
+                                             "Story characters, models, nearby entities",
+                                             "Waypoint, slots, coordinates, no-clip",
+                                             "Clock, presets, game speed",
+                                             "Weather type, rain and wind",
+                                             "Traffic, pedestrians, nearby actions, gravity",
+                                             "Camera, screen effects, radio, logging"};
         Page* pages[static_cast<int>(Category::Count)] = {};
         for (int c = 0; c < static_cast<int>(Category::Count); ++c) pages[c] = &menu.AddPage(CategoryName(static_cast<Category>(c)));
         Page& set = menu.AddPage("SETTINGS");
@@ -359,27 +461,36 @@ public:
             int total = 0, usable = 0;
             for (auto& f : features_)
                 if (static_cast<int>(f.cat) == c) { ++total; usable += Usable(f) ? 1 : 0; }
-            char label[64];
-            std::snprintf(label, sizeof(label), "%s  (%d/%d)", CategoryName(static_cast<Category>(c)), usable, total);
-            menu.Root().Submenu(label, *pages[c]);
+            char count[32];
+            std::snprintf(count, sizeof(count), "%d/%d", usable, total);
+            menu.Root().Submenu(kTitles[c], *pages[c]).Tag(count, kTagCount).Hint(kHints[c]);
         }
-        menu.Root().Submenu("SETTINGS", set);
-        for (auto& f : features_) {
-            Page& p = *pages[static_cast<int>(f.cat)];
-            Feature* fp = &f;
-            std::string label = Label(f);
+        menu.Root().Submenu("Settings", set).Hint("Experimental features, re-apply interval, status line");
+        for (int c = 0; c < static_cast<int>(Category::Count); ++c)
+        for (const auto& entry : Ordered(static_cast<Category>(c))) {
+            Page& p = *pages[c];
+            if (entry.first) p.Section(entry.first);
+            Feature* fp = entry.second;
+            Feature& f = *fp;
             switch (f.kind) {
-                case Kind::Action: p.Button(label, [this, fp] { Activate(*fp); }); break;
-                case Kind::Toggle: p.Toggle(label, &f.on, [this, fp] { Activate(*fp); }); break;
-                case Kind::Int: p.Int(label, &f.i, f.imin, f.imax, f.istep, [this, fp] { Activate(*fp); }); break;
-                case Kind::Float: p.Float(label, &f.f, f.fmin, f.fmax, f.fstep, 2, [this, fp] { Activate(*fp); }); break;
-                case Kind::Choice: p.Choice(label, &f.i, f.options, [this, fp] { Activate(*fp); }); break;
+                case Kind::Action: p.Button(f.label, [this, fp] { Activate(*fp); }); break;
+                case Kind::Toggle: p.Toggle(f.label, &f.on, [this, fp] { Activate(*fp); }); break;
+                case Kind::Int: p.Int(f.label, &f.i, f.imin, f.imax, f.istep, [this, fp] { Activate(*fp); }); break;
+                case Kind::Float: p.Float(f.label, &f.f, f.fmin, f.fmax, f.fstep, 2, [this, fp] { Activate(*fp); }); break;
+                case Kind::Choice: p.Choice(f.label, &f.i, f.options, [this, fp] { Activate(*fp); }); break;
             }
+            std::string tag = Tag(f);
+            if (!tag.empty()) p.Tag(tag, TagColor(f));
+            p.Hint(Hint(f)).Dim(!Usable(f));
         }
-        set.Toggle("Allow experimental natives", &settings.allowExperimental)
+        set.Toggle("Allow experimental features", &settings.allowExperimental)
+            .Hint("Runs features whose natives or arguments are not confirmed yet")
             .Int("Re-apply interval (ms)", &settings.reapplyMs, 100, 5000, 50)
+            .Hint("How often held toggles are applied again")
             .Toggle("Status line", &settings.showStatus)
-            .Button("Log feature availability", [this] { LogAvailability(); });
+            .Hint("Position, heading and speed at the top left")
+            .Button("Log feature availability", [this] { LogAvailability(); })
+            .Hint("Writes every feature's state to shvi.log");
     }
 
     void LogAvailability() {
@@ -941,7 +1052,7 @@ private:
                [](Ctx& c, Feature& f) { A::SET_PED_GRAVITY(c.ped, !f.on); });
         Toggle(C::Player, "player.nocollision", "No collision", {"SET_ENTITY_COLLISION"}, Hold::Interval,
                [](Ctx& c, Feature& f) { A::SET_ENTITY_COLLISION(c.ped, !f.on, false, false); })
-            .guess = true;  // VI added a second bool; both are set alike here
+            .checked = "2026-11-26: GET_ENTITY_COLLISION_DISABLED read 1 on, 0 off";  // VI added a second bool; both are set alike here
         Action(C::Player, "player.clean", "Clean blood and water", {"CLEAR_PED_BLOOD_DAMAGE", "CLEAR_PED_WETNESS"},
                [](Ctx& c, Feature&) {
                    A::CLEAR_PED_BLOOD_DAMAGE(c.ped);
@@ -1031,7 +1142,7 @@ private:
                    // scripts call it as (ped, collection, 0x066532DD "LoadOut")
                    std::uint32_t h = HashAt(kWeaponCollections, f.i);
                    if (h) A::_GIVE_WEAPON_COLLECTION_TO_PED(c.ped, h, 0x066532DDu);
-               });
+               }).checked = "runs 47, 50 and 2026-11-26: the listed weapons change with each collection (1 to 4)";
         // A collection replaces the ped's weapons (seen in game, run 47: 1 -> 2 -> 4 -> 2 listed weapons). This
         // applies each collection in turn, counts the listed weapons the ped then has,
         // logs the table and ends on the largest one. Five seconds apart: the weapons arrive late.
@@ -1040,7 +1151,7 @@ private:
                    scan_ = CollectionScan{};
                    scan_.active = true;
                    Log("trainer: trying every weapon collection");
-               });
+               }).checked = "2026-11-26: scanned all collections, applied the largest (4 listed weapons)";
         Choice(C::Weapons, "weapon.equip", "Equip weapon", {"SET_CURRENT_PED_WEAPON"}, kWeapons, [](Ctx& c, Feature& f) {
             std::uint32_t h = HashAt(kWeapons, f.i);
             if (h) A::SET_CURRENT_PED_WEAPON(c.ped, h, true, 0, false, false, 4);
@@ -1055,17 +1166,20 @@ private:
                 if (w.hash) GiveItem(c.ped, w.hash, 1);
         }).blocked = kAsyncBlocked;
         Choice(C::Weapons, "weapon.ammotype", "Ammo type", {}, kAmmoTypes, [](Ctx&, Feature&) {});
-        Int(C::Weapons, "weapon.setammo", "Set ammo of that type", {"SET_PED_AMMO_BY_TYPE"}, 250, 0, 9999, 50,
+        // In game the native only raises the count and stops at the type's maximum: 0 -> 37 -> 60 took, 60 -> 10
+        // did not, 250 gave 100. To lower, remove all ammo first.
+        Int(C::Weapons, "weapon.setammo", "Raise ammo of that type to", {"SET_PED_AMMO_BY_TYPE"}, 250, 0, 9999, 50,
             [this](Ctx& c, Feature& f) {
                 Feature* t = Find("weapon.ammotype");
                 std::uint32_t h = t ? HashAt(kAmmoTypes, t->i) : 0;
                 if (h) A::SET_PED_AMMO_BY_TYPE(c.ped, h, f.i, 0);
             })
-            .guess = true;  // the fourth argument is a hash scripts pass; 0 is assumed to mean "no reason"
+            .checked = "2026-11-26: pistol ammo 0 -> 37 -> 60 by read-back; never lowers, capped at 100";
         Action(C::Weapons, "weapon.drop", "Drop current weapon", {"MAKE_PED_DROP_WEAPON"},
                [](Ctx& c, Feature&) { A::MAKE_PED_DROP_WEAPON(c.ped, true, 0, false, false); });
         Action(C::Weapons, "weapon.removeammo", "Remove all ammo", {"_REMOVE_ALL_PED_AMMO"},
-               [](Ctx& c, Feature&) { A::_REMOVE_ALL_PED_AMMO(c.ped); });
+               [](Ctx& c, Feature&) { A::_REMOVE_ALL_PED_AMMO(c.ped); })
+            .checked = "2026-11-26: pistol 100 and a second type 12 -> none left by read-back";
         Toggle(C::Weapons, "weapon.hide", "Hide carried weapons", {"_HIDE_PED_WEAPONS"}, Hold::None,
                [](Ctx& c, Feature& f) {
                    if (f.on) A::_HIDE_PED_WEAPONS(c.ped, 2, true);
@@ -1433,11 +1547,12 @@ private:
             // (34 of 55 literal call sites); the earlier (1, 0, 1, 0, 0, 0) had no readable effect in game (run 33).
             std::uint32_t h = HashAt(kWeatherTypes, f.i);
             if (h) A::SET_WEATHER_TYPE(h, true, true, false, 0.0f, false, true);
-        }).guess = true;  // the five flags follow the most common script call, their meaning is not checked
+        }).checked = "2026-11-26: each type gives its own weather read-back (SUNNY 0x57F53C65, OVERCAST 0x5EBC0DF0, FOG 0x9033FF87)";
+        // The getter reports a different hash than the one set (above): it names the weather the game resolves to.
         Toggle(C::Weather, "weather.hold", "Hold selected weather", {"SET_WEATHER_TYPE"}, Hold::Interval, [this](Ctx&, Feature& f) {
             std::uint32_t h = HashAt(kWeatherTypes, Find("weather.type")->i);
             if (f.on && h) A::SET_WEATHER_TYPE(h, true, true, false, 0.0f, false, true);
-        }).guess = true;
+        }).checked = "2026-11-26: same call as Weather, re-applied";
         Action(C::Weather, "weather.random", "Random weather", {"SET_RANDOM_WEATHER_TYPE"}, [](Ctx&, Feature&) { A::SET_RANDOM_WEATHER_TYPE(false, false); });
         Action(C::Weather, "weather.clear", "Clear weather override", {"CLEAR_OVERRIDE_WEATHER", "CLEAR_WEATHER_TYPE_PERSIST"}, [](Ctx&, Feature&) {
             A::CLEAR_OVERRIDE_WEATHER();
@@ -1716,6 +1831,37 @@ private:
             }
             if (has("_GET_PED_STAMINA") && has("_GET_PED_MAX_STAMINA")) {
                 std::snprintf(b, sizeof(b), "trainer: probe stamina %.1f / %.1f", A::_GET_PED_STAMINA(c.ped), A::_GET_PED_MAX_STAMINA(c.ped));
+                Log(b);
+            }
+            // Read-backs for the experimental features (what each one should change).
+            if (has("GET_WANTED_SCORE")) {
+                std::snprintf(b, sizeof(b), "trainer: probe wanted score %d", A::GET_WANTED_SCORE(c.ped));
+                Log(b);
+            }
+            if (has("_GET_CURRENT_PED_WEAPON_AMMO_TYPE") && has("GET_PED_AMMO_BY_TYPE")) {
+                std::uint32_t at = A::_GET_CURRENT_PED_WEAPON_AMMO_TYPE(c.ped, Ref{});
+                std::snprintf(b, sizeof(b), "trainer: probe current ammo type 0x%08X: %d rounds", at, at ? A::GET_PED_AMMO_BY_TYPE(c.ped, at) : -1);
+                Log(b);
+                int shown = 0;
+                for (const HashName& a : kAmmoTypes) {
+                    if (!a.hash || shown >= 6) continue;
+                    int n = A::GET_PED_AMMO_BY_TYPE(c.ped, a.hash);
+                    if (n <= 0) continue;
+                    ++shown;
+                    std::snprintf(b, sizeof(b), "trainer: probe ammo %s (0x%08X) %d", a.name, a.hash, n);
+                    Log(b);
+                }
+            }
+            if (has("IS_PLAYER_TELEPORT_ACTIVE") && has("IS_ENTITY_IN_WATER") && has("GET_ENTITY_HEIGHT_ABOVE_GROUND")) {
+                std::snprintf(b, sizeof(b), "trainer: probe teleport active %d, in water %d, height above ground %.2f", A::IS_PLAYER_TELEPORT_ACTIVE() ? 1 : 0,
+                              A::IS_ENTITY_IN_WATER(c.ped) ? 1 : 0, A::GET_ENTITY_HEIGHT_ABOVE_GROUND(c.ped, true));
+                Log(b);
+            }
+            if (c.inVehicle && has("IS_VEHICLE_TYRE_BURST") && has("IS_VEHICLE_ALARM_ACTIVATED")) {
+                int burst = 0;
+                for (int w = 0; w < 8; ++w) burst += A::IS_VEHICLE_TYRE_BURST(c.veh, w, false) ? 1 : 0;
+                std::snprintf(b, sizeof(b), "trainer: probe vehicle tyres burst %d, alarm %d, tyres can burst %d", burst, A::IS_VEHICLE_ALARM_ACTIVATED(c.veh) ? 1 : 0,
+                              has("GET_VEHICLE_TYRES_CAN_BURST") && A::GET_VEHICLE_TYRES_CAN_BURST(c.veh) ? 1 : 0);
                 Log(b);
             }
         });

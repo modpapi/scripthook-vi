@@ -1,5 +1,6 @@
 // Unit tests for the generic core. No game needed: fake memory images, fake
 // native handlers, a fake clock and a fake shvi_api table.
+#include <cmath>
 #include "core/callbacks.h"
 #include "core/crossmap.h"
 #include "core/denylist.h"
@@ -617,19 +618,65 @@ TEST(ui_menu_layout_header_items_highlight_values_counter) {
         for (auto& d : dl) n += d.kind == DrawCmd::Text && d.text == s2;
         return n;
     };
-    CHECK(texts("TRAINER") == 1 && texts("God mode") == 1 && texts("ON") == 1);
-    CHECK(texts("< 4 >") == 1 && texts("< 0.50 >") == 1 && texts("< Green >") == 1 && texts(">>") == 1);
+    // title in the header, the root caption below it; a toggle is a switch (rects), not text
+    CHECK(texts("TRAINER") == 1 && texts("MAIN MENU") == 1 && texts("God mode") == 1 && texts("ON") == 0 && texts("OFF") == 0);
+    // unselected values carry no arrows; a submenu shows a chevron
+    CHECK(texts("4") == 1 && texts("0.50") == 1 && texts("Green") == 1 && texts(">") == 1);
     CHECK(texts("2 / 6") == 1);
     // header rect first, at the style origin
     CHECK(dl[0].kind == DrawCmd::Rect && dl[0].x == st.x && dl[0].y == st.y && dl[0].w == st.width);
-    // exactly one item row uses the highlight colour, and it's row 1
+    // exactly one item row uses the highlight colour, and it's row 1 under header, stripe and sub-header
+    const float listTop = st.y + st.headerHeight + st.accentHeight + st.subHeight;
     int hi = 0; float hiY = 0;
     for (auto& d : dl)
         if (d.kind == DrawCmd::Rect && d.color == st.highlight) { ++hi; hiY = d.y; }
-    CHECK(hi == 1 && hiY == st.y + st.headerHeight + st.itemHeight);
-    // the value text is right-aligned to the panel's inner edge
+    CHECK(hi == 1 && hiY == listTop + st.itemHeight);
+    // the switch is on (on colour) and ends at the panel's inner edge
+    int on = 0;
     for (auto& d : dl)
-        if (d.kind == DrawCmd::Text && d.text == "ON") CHECK(d.align == Align::Right && d.x == st.x + st.width - st.padX);
+        if (d.kind == DrawCmd::Rect && d.color == st.switchOn) { ++on; CHECK(std::fabs(d.x + d.w - (st.x + st.width - st.padX)) < 1e-6f); }
+    CHECK(on == 1);
+    // the selected slider shows arrows
+    m.Handle(Action::Down);
+    dl = m.Layout(st);
+    CHECK(texts("<  4  >") == 1);
+}
+
+TEST(ui_menu_sections_tags_hints_and_fitting) {
+    using namespace shvi::ui;
+    bool a = false, b = false;
+    Menu m("ROOT");
+    m.Root().Section("Group one").Toggle("First", &a).Tag("EXP", {200, 100, 0, 255}).Hint("first hint")
+        .Section("Group two").Toggle("A label far too long to fit in the menu panel at any sensible size, really", &b).Dim();
+    m.Handle(Action::Open);
+    m.Handle(Action::Down);                        // settles on the first selectable item and moves past the heading
+    CHECK(m.Cursor() == 3);
+    m.Handle(Action::Down);                        // wraps over the heading at index 0
+    CHECK(m.Cursor() == 1);
+    CHECK(m.Position() == std::make_pair(1, 2));
+    Style st;
+    DrawList dl = m.Layout(st);
+    auto has = [&](std::string_view s2) {
+        for (auto& d : dl) if (d.kind == DrawCmd::Text && d.text == s2) return true;
+        return false;
+    };
+    CHECK(has("Group one") && has("Group two") && has("EXP") && has("first hint"));
+    bool cut = false;
+    for (auto& d : dl)
+        if (d.kind == DrawCmd::Text && d.text.size() > 3 && d.text.compare(d.text.size() - 3, 3, "...") == 0 && d.text.rfind("A label", 0) == 0) {
+            cut = true;
+            CHECK(d.x + TextWidth(d.text, d.scale, d.font, st) <= st.x + st.width);
+            CHECK(d.color == st.textDim);
+        }
+    CHECK(cut);
+    CHECK(FitText("short", 1.0f, 0.3f, 0, st) == "short");
+    CHECK(TextWidth("WWW", 0.3f, 0, st) > TextWidth("iii", 0.3f, 0, st));
+    // a rebuilt menu returns to the same place
+    std::vector<int> path = m.Path();
+    Menu m2("ROOT");
+    m2.Root().Section("Group one").Toggle("First", &a).Section("Group two").Toggle("Second", &b);
+    m2.RestorePath(path);
+    CHECK(m2.Cursor() == 1);
 }
 
 TEST(ui_input_queue_maps_keys_across_threads) {
