@@ -1,9 +1,23 @@
 cmake_minimum_required(VERSION 3.24)
-project(scripthook_vi VERSION 0.1.0 LANGUAGES C CXX ASM_MASM)
+project(scripthook_vi VERSION 0.1.0 LANGUAGES C CXX)
 
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "ScriptHook VI is x64 only")
 endif()
+
+# ---------------------------------------------------------------- platform
+# One tree, three platforms (sdk/include/shvi/shvi.h, "Platforms"):
+#   win64  MSVC on Windows: the game core, proxy loaders, tools, samples as .asi, all tests
+#   ps5    -DCMAKE_TOOLCHAIN_FILE=sdk/cmake/toolchains/ps5.cmake: the ELF loader payload and the
+#          samples as self-contained PS5 mod images (<mod>.elf)
+#   sim    any other desktop compiler (Linux/macOS): the engine, shvi_sim and the samples as .so
+include(sdk/cmake/ShviMod.cmake)
+message(STATUS "ScriptHook VI platform: ${SHVI_PLATFORM}")
+if(NOT SHVI_PLATFORM STREQUAL "win64")
+  include(cmake/portable.cmake)
+  return()
+endif()
+enable_language(ASM_MASM)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -93,19 +107,14 @@ target_link_libraries(shvi_pick_proxy PRIVATE shvi_core_lib)
 add_executable(shvi_scan tools/scan/main.cpp)
 target_link_libraries(shvi_scan PRIVATE shvi_profiles)
 
-add_library(hello_engine SHARED samples/hello_engine/hello_engine.c)
-target_include_directories(hello_engine PRIVATE sdk/include)
-set_target_properties(hello_engine PROPERTIES SUFFIX ".asi")
-
-add_library(menu_demo SHARED samples/menu_demo/menu_demo.cpp)
-target_include_directories(menu_demo PRIVATE sdk/include)
-set_target_properties(menu_demo PROPERTIES SUFFIX ".asi")
-
+# Samples are built with the SDK's shvi_add_mod(), exactly like a mod made with the shvi CLI.
+shvi_add_mod(hello_engine SOURCES samples/hello_engine/hello_engine.c NO_INSTALL)
+shvi_add_mod(menu_demo SOURCES samples/menu_demo/menu_demo.cpp NO_INSTALL)
 # The trainer: mod-menu logic on the generated NativeDB wrappers (sdk/include/shvi/natives_full.hpp).
-add_library(trainer SHARED samples/trainer/trainer_main.cpp)
-target_include_directories(trainer PRIVATE sdk/include)
-target_compile_options(trainer PRIVATE /bigobj)
-set_target_properties(trainer PROPERTIES SUFFIX ".asi")
+shvi_add_mod(trainer SOURCES samples/trainer/trainer_main.cpp NO_INSTALL)
+
+# ---------------------------------------------------------------- portable engine (sim, PS5 runtime)
+include(cmake/engine.cmake)
 
 enable_testing()
 add_executable(shvi_trainer_tests tests/trainer_tests.cpp)

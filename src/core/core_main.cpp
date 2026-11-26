@@ -171,6 +171,13 @@ void OnTick() {  // game script thread, once per frame
 
 // ------------------------------------------------------------------ C ABI
 void RemovePresentOwner(HMODULE owner);  // ABI 1.4, below
+HMODULE ModuleOf(const void* address);    // below
+// Plugins pass SHVI_THIS_MODULE: &__ImageBase, or (SDK >= the multi-platform SDK) a per-module
+// anchor inside the image. Both name the same owner once mapped to the containing module.
+void* OwnerOf(void* module) {
+    HMODULE m = module ? ModuleOf(module) : nullptr;
+    return m ? static_cast<void*>(m) : module;
+}
 void ApiLog(const char* m) { SHVI_LOG("[plugin] %s", m ? m : "(null)"); }
 const char* ApiGameName() { return g ? g->gameName.c_str() : ""; }
 std::uint32_t ApiGameBuild() { return g && g->profile ? g->profile->Build() : 0; }
@@ -179,11 +186,12 @@ int ApiIsBlocked() { return g && g->guard.Latched() ? 1 : 0; }
 int ApiScriptRegister(void* module, shvi_script_fn fn, void* user) {
     if (!g || !fn) return SHVI_E_INVALID_ARG;
     if (g->guard.Latched()) return SHVI_E_BLOCKED;
-    g->scheduler.Add(module, fn, user);
+    g->scheduler.Add(OwnerOf(module), fn, user);
     return SHVI_OK;
 }
 void ApiModuleUnregister(void* module) {
     if (!g) return;
+    module = OwnerOf(module);
     g->scheduler.RemoveOwner(module);
     g->tickCallbacks.RemoveOwner(module);
     g->keys.RemoveOwner(module);
@@ -244,7 +252,7 @@ int ApiKeyboardRegister(shvi_keyboard_fn fn, void* user) {
 int ApiTickRegister(void* module, shvi_tick_fn fn, void* user) {
     if (!g || !fn) return SHVI_E_INVALID_ARG;
     if (g->guard.Latched()) return SHVI_E_BLOCKED;
-    g->tickCallbacks.Add(module, fn, user);
+    g->tickCallbacks.Add(OwnerOf(module), fn, user);
     return SHVI_OK;
 }
 

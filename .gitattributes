@@ -7,3 +7,4 @@ sdk/include/shvi/natives_meta.inc text eol=lf
 crossmap/** text eol=lf
 *.jpg binary
 *.png binary
+*.sh text eol=lf

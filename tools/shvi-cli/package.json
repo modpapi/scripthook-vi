@@ -1,0 +1,18 @@
+{
+  "name": "shvi-cli",
+  "version": "0.2.0",
+  "description": "ScriptHook VI command line: create, build, test, package and deploy mods for PC and PS5",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "shvi": "./src/cli.ts"
+  },
+  "scripts": {
+    "shvi": "bun src/cli.ts",
+    "test": "bun test",
+    "compile": "bun build src/cli.ts --compile --outfile dist/shvi"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  }
+}

@@ -9,9 +9,6 @@
 #include <shvi/shvi.h>
 
 #include <stdio.h>
-#include <windows.h>
-
-extern IMAGE_DOS_HEADER __ImageBase;
 static const shvi_api* g_api;
 
 static void script_main(void* user) {
@@ -36,5 +33,5 @@ static void script_main(void* user) {
 SHVI_PLUGIN_EXPORT int shvi_plugin_load(const shvi_api* api) {
     if (!shvi_api_compatible(api)) return SHVI_E_ABI_MISMATCH;
     g_api = api;
-    return api->script_register(&__ImageBase, script_main, NULL);
+    return api->script_register(SHVI_THIS_MODULE, script_main, NULL);
 }

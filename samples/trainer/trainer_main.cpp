@@ -1,4 +1,5 @@
-// ScriptHook VI trainer plugin (trainer.asi -> <game>\shvi\plugins\).
+// ScriptHook VI trainer plugin. One source, every platform:
+//   PC: trainer.asi -> <game>\shvi\plugins\     PS5: trainer.so -> /data/shvi/plugins/
 //
 // F4 opens/closes. Numpad 8/2 or arrow keys move, 4/6 or left/right change a value, 5/Enter selects,
 // 0/Backspace goes back. With no-clip on, W/S (or numpad 9/3) move along the camera.
@@ -9,27 +10,30 @@
 // nativedb/db/<build>/native_table_full.json as <game>\shvi\natives\<build>.json to get the full set.
 #include "trainer.hpp"
 
+#include <shvi/platform.h>
 #include <shvi/vi_ui.hpp>
 
-#include <windows.h>
-
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <string>
 #include <vector>
 
-extern "C" IMAGE_DOS_HEADER __ImageBase;
-
 namespace {
+
+std::uint32_t NowMs() {
+    using namespace std::chrono;
+    return static_cast<std::uint32_t>(duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
+}
 
 shvi::ui::InputQueue g_input;
 std::atomic<int> g_forward{0}, g_back{0};
 
 void OnKey(std::uint32_t vk, int isDown, void* user) {
-    if (vk == 'W' || vk == VK_NUMPAD9) g_forward = isDown ? 1 : 0;
-    if (vk == 'S' || vk == VK_NUMPAD3) g_back = isDown ? 1 : 0;
+    if (vk == 'W' || vk == shvi::ui::vk::Numpad9) g_forward = isDown ? 1 : 0;
+    if (vk == 'S' || vk == shvi::ui::vk::Numpad3) g_back = isDown ? 1 : 0;
     shvi::ui::InputQueue::OnKey(vk, isDown, user);
 }
 
@@ -41,9 +45,9 @@ struct AutoStep {
     std::string id, arg;
     bool done = false;
 };
-std::vector<AutoStep> LoadAutorun(const std::wstring& shviDir) {
+std::vector<AutoStep> LoadAutorun(const std::string& shviDir) {
     std::vector<AutoStep> steps;
-    std::ifstream in(shviDir + L"trainer_autorun.txt");
+    std::ifstream in(shviDir + "trainer_autorun.txt");
     for (std::string line; std::getline(in, line);) {
         if (line.empty() || line[0] == '#') continue;
         AutoStep st;
@@ -64,19 +68,17 @@ void ScriptMain(void*) {
     style.maxVisible = 14;
     vi::EngineBackend backend;
 
-    // The shvi folder, from this plugin's own path (<game>\shvi\plugins\trainer.asi). Not from the process
-    // exe: under a host such as VIctory that is the host's exe, not the game's.
-    std::wstring shviDir;
+    // The shvi folder, from this plugin's own path (<game>\shvi\plugins\trainer.asi, or /data/shvi/ on
+    // PS5). Not from the process exe: under a host such as VIctory that is the host's exe, not the game's.
+    std::string shviDir;
     {
-        wchar_t self[MAX_PATH] = {};
-        GetModuleFileNameW(reinterpret_cast<HMODULE>(&__ImageBase), self, MAX_PATH);
-        std::wstring p(self);
-        p = p.substr(0, p.find_last_of(L"\\/"));              // ...\shvi\plugins
-        shviDir = p.substr(0, p.find_last_of(L"\\/") + 1);    // ...\shvi\ (with the slash)
+        char dir[1024] = {};
+        shvi_mod_data_dir(dir, sizeof(dir));
+        shviDir = dir;
     }
     // Optional model list for the spawner: shvi\trainer_models.txt, one model name or 0xHASH per line.
     {
-        std::ifstream in(shviDir + L"trainer_models.txt");
+        std::ifstream in(shviDir + "trainer_models.txt");
         std::vector<std::string> models;
         for (std::string line; std::getline(in, line);) {
             while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t')) line.pop_back();
@@ -102,7 +104,7 @@ void ScriptMain(void*) {
     for (;;) {
         // The host binds its native table once the game is ready; look again every two seconds and
         // rebuild the menu when what is usable changed.
-        std::uint32_t now = GetTickCount();
+        std::uint32_t now = NowMs();
         if (!built || now - lastRefresh > 2000 || lastExperimental != t.settings.allowExperimental) {
             lastRefresh = now;
             t.Refresh();
@@ -204,5 +206,5 @@ extern "C" SHVI_PLUGIN_EXPORT int shvi_plugin_load(const shvi_api* a) {
     shvi::api() = a;
     int rc = a->keyboard_register(&OnKey, &g_input);
     if (rc != SHVI_OK) return rc;
-    return a->script_register(&__ImageBase, ScriptMain, nullptr);
+    return a->script_register(SHVI_THIS_MODULE, ScriptMain, nullptr);
 }

@@ -1,0 +1,70 @@
+# On a v* tag: run CI, then publish the SDK (tar.gz + zip, with the prebuilt PC runtime and the PS5
+# loader), the shvi CLI as single binaries for Windows / Linux / macOS, and the install scripts.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  package:
+    needs: ci
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Version from the tag must match the CLI
+        id: v
+        run: |
+          tag="${{ github.ref_name }}"
+          version="${tag#v}"
+          cli="$(jq -r .version tools/shvi-cli/package.json)"
+          if [ "$version" != "$cli" ]; then echo "tag $tag != tools/shvi-cli/package.json $cli" >&2; exit 1; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        with:
+          name: win64-runtime
+          path: artifacts/win64
+      - uses: actions/download-artifact@v4
+        with:
+          name: ps5-elfs
+          path: artifacts/ps5
+      - name: SDK archives
+        run: |
+          bun tools/release/package-sdk.ts --version "${{ steps.v.outputs.version }}" \
+            --win64-runtime artifacts/win64 --ps5-loader artifacts/ps5/shvi_loader.elf --out dist
+      - name: Sample mods as player packages
+        run: |
+          mkdir -p dist/samples
+          cd artifacts/ps5 && zip -q "../../dist/samples/samples-ps5-${{ steps.v.outputs.version }}.zip" *.elf && cd ../..
+          cd artifacts/win64/game && zip -qr "../../../dist/samples/samples-pc-${{ steps.v.outputs.version }}.zip" shvi/plugins && cd ../../..
+      - name: CLI binaries
+        run: |
+          for t in windows-x64 linux-x64 darwin-x64 darwin-arm64; do
+            ext=""; [ "$t" = windows-x64 ] && ext=".exe"
+            bun build tools/shvi-cli/src/cli.ts --compile --minify --target="bun-$t" --outfile "dist/cli/shvi-$t$ext"
+          done
+          cp tools/release/install.sh tools/release/install.ps1 dist/cli/
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum shvi-sdk-*.tar.gz shvi-sdk-*.zip cli/* samples/* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.v.outputs.tag }}"
+          files=(dist/shvi-sdk-*.tar.gz dist/shvi-sdk-*.zip dist/cli/* dist/samples/* dist/SHA256SUMS.txt)
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "${files[@]}" --clobber
+          else
+            gh release create "$tag" "${files[@]}" --title "ScriptHook VI $tag" --generate-notes --prerelease
+          fi
