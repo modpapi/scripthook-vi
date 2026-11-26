@@ -1,0 +1,25 @@
+# cmake -DA=<dir> -DB=<dir> -P compare_dirs.cmake
+# Fails unless both folders hold the same relative file list and every file is byte-identical.
+# Also usable with include() + compare_dirs(<a> <b>).
+function(compare_dirs a b)
+  file(GLOB_RECURSE la RELATIVE "${a}" "${a}/*")
+  file(GLOB_RECURSE lb RELATIVE "${b}" "${b}/*")
+  list(SORT la)
+  list(SORT lb)
+  if(NOT la STREQUAL lb)
+    message(FATAL_ERROR "file lists differ:\n  ${a}: ${la}\n  ${b}: ${lb}")
+  endif()
+  if(NOT la)
+    message(FATAL_ERROR "no files in ${a}")
+  endif()
+  foreach(f IN LISTS la)
+    execute_process(COMMAND ${CMAKE_COMMAND} -E compare_files "${a}/${f}" "${b}/${f}" RESULT_VARIABLE rc)
+    if(NOT rc EQUAL 0)
+      message(FATAL_ERROR "differs: ${f}")
+    endif()
+  endforeach()
+endfunction()
+
+if(DEFINED A AND DEFINED B)
+  compare_dirs("${A}" "${B}")
+endif()

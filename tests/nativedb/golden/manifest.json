@@ -1,0 +1,44 @@
+{
+  "build": {
+    "exe": {
+      "name": "synth.exe",
+      "sha256": "8db0238e8a1fb16cb52a0bf303b1c34c1bb67a17f1f4f96bc5bd5fa8d079e79a",
+      "size": 28672
+    },
+    "image_size": "0x00007000",
+    "key": 1592590337,
+    "machine": "0x8664"
+  },
+  "census": {
+    "handlers": 8,
+    "lock": {
+      "acquire": "0x00001000",
+      "global": "0x00006000",
+      "release": "0x00001010",
+      "voters": 5,
+      "votes": 5
+    }
+  },
+  "inputs": [
+    {
+      "name": "synth.exe",
+      "role": "exe",
+      "sha256": "8db0238e8a1fb16cb52a0bf303b1c34c1bb67a17f1f4f96bc5bd5fa8d079e79a",
+      "size": 28672
+    }
+  ],
+  "outputs": [
+    {
+      "path": "census.tsv",
+      "sha256": "6b11d36995dac203ea388f125d4712b35028b1a307b69d149c1fa8d04996e8de",
+      "size": 397
+    }
+  ],
+  "tool": {
+    "name": "shvi_nativedb",
+    "schema": 1,
+    "version": "0.1.0",
+    "zycore": "0b2432ced0884fd152b471d97ecf0258ff4d859f",
+    "zydis": "a2278f1d254e492f6a6b39f6cb5d1f5d515659dc"
+  }
+}

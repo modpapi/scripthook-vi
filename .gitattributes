@@ -1,0 +1,9 @@
+# Keep generated and golden files byte-identical on every platform (tests compare them).
+* text=auto
+tests/nativedb/golden/** text eol=lf
+nativedb/** text eol=lf
+sdk/include/shvi/natives_*.hpp text eol=lf
+sdk/include/shvi/natives_meta.inc text eol=lf
+crossmap/** text eol=lf
+*.jpg binary
+*.png binary

@@ -1,0 +1,8 @@
+LIBRARY dinput8
+EXPORTS
+    DirectInput8Create=shvi_stub_00
+    DllCanUnloadNow=shvi_stub_01 PRIVATE
+    DllGetClassObject=shvi_stub_02 PRIVATE
+    DllRegisterServer=shvi_stub_03 PRIVATE
+    DllUnregisterServer=shvi_stub_04 PRIVATE
+    GetdfDIJoystick=shvi_stub_05

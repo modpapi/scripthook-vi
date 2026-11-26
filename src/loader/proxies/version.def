@@ -1,0 +1,19 @@
+LIBRARY version
+EXPORTS
+    GetFileVersionInfoA=shvi_stub_00
+    GetFileVersionInfoByHandle=shvi_stub_01
+    GetFileVersionInfoExA=shvi_stub_02
+    GetFileVersionInfoExW=shvi_stub_03
+    GetFileVersionInfoSizeA=shvi_stub_04
+    GetFileVersionInfoSizeExA=shvi_stub_05
+    GetFileVersionInfoSizeExW=shvi_stub_06
+    GetFileVersionInfoSizeW=shvi_stub_07
+    GetFileVersionInfoW=shvi_stub_08
+    VerFindFileA=shvi_stub_09
+    VerFindFileW=shvi_stub_10
+    VerInstallFileA=shvi_stub_11
+    VerInstallFileW=shvi_stub_12
+    VerLanguageNameA=shvi_stub_13
+    VerLanguageNameW=shvi_stub_14
+    VerQueryValueA=shvi_stub_15
+    VerQueryValueW=shvi_stub_16
