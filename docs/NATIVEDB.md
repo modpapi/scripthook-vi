@@ -8,8 +8,8 @@ table was bound in the running game and a first set of natives was called and re
 |---|---|
 | Natives | 6,829 (all handlers in the exe; 6,800 are called by the shipped scripts) |
 | With hash, RVA, cell counts, typed parameters and return type | 6,829 |
-| With a name | 2,034 |
-| Unnamed, with a ranked candidate name | 2,850 |
+| With a name | 2,053 |
+| Unnamed, with a ranked candidate name | 2,813 |
 
 ## 1. Files
 
@@ -119,13 +119,13 @@ ordering.
 
 | `confidence` | Natives | How the name got there |
 |---|---|---|
-| `verified-high`, `-medium`, `-descriptive`, `-deny` | 52 | Behaviour-checked by hand in IDA: the 43 of `crossmap/gta6_xbox_1.0.2.1.json` plus 9 accepted in `analysis/nativedb/reviews.json` |
+| `verified-high`, `-medium`, `-descriptive`, `-deny` | 62 | Behaviour-checked by hand in IDA: the entries of `crossmap/gta6_xbox_1.0.2.1.json` plus those accepted in `analysis/nativedb/reviews.json` |
 | `corroborated` | 1,165 | A guide name whose sort key is in layout order with its neighbours |
-| `inferred-high` | 26 | No guide name. The only candidate that fits the bracket and the signature, by a wide margin |
-| `inferred-medium` | 188 | As above with a smaller margin (183), or a reviewed name whose behaviour is only partly read (5: the async creators, item give, gravity level) |
+| `inferred-high` | 29 | No guide name. The only candidate that fits the bracket and the signature, by a wide margin |
+| `inferred-medium` | 194 | As above with a smaller margin, or a reviewed name whose behaviour is only partly read |
 | `guide` | 550 | A guide name with a community-invented spelling (leading `_`): it has no sort key, so the layout can't check it |
 | `guide-order-conflict` | 53 | A guide name that sorts outside its neighbours: the name is wrong, or the function is named differently |
-| `unnamed` | 4,795 | `_0x<hash>` |
+| `unnamed` | 4,776 | `_0x<hash>` |
 
 The guide is the third-party decompiled script dump. It is never taken on its
 word: a guide name is `corroborated` only when the layout agrees, and the two classes the layout can't
@@ -282,10 +282,10 @@ native.
 
 - Mostly static. In game, about 30 names have been exercised so far; all behaved as their
   names say, including 15 that were only layout-corroborated or guide names. A `corroborated` name says the handler sits where a function of that name would be and
-  that its signature is compatible; it does not prove behaviour. Only the 43 `verified-*` entries do.
+  that its signature is compatible; it does not prove behaviour. Only the 62 `verified-*` entries do.
 - Argument *meanings* follow the reference signature where the types fit. VI added and reordered
   parameters, so a `BOOL p3` may not mean what it meant in GTA V.
-- 4,795 natives are unnamed. Most have no counterpart name in GTA V or RDR2 to find.
+- 4,776 natives are unnamed. Most have no counterpart name in GTA V or RDR2 to find.
 - The sort keys of RDR2-only names are guesses (CamelCase of the public name).
 - `GET_ENTITY_HEADING` returns radians, not GTA V's degrees: units can differ even when the name fits.
 - One build. Nothing is known yet about hash stability across builds or on PC.
