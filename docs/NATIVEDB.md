@@ -238,9 +238,10 @@ native.
   `0x8000002F`). On completion the 16-byte result is queued or copied by `0x140BCCB60`, which clamps to
   the destination object's type size (`u16 +112` of the type record). In game, neither built-in type works
   as the token (`TRAINER.md` §5): a plugin cannot call these natives directly, only through a script.
-- **Model keys are 64 bits.** `GET_ENTITY_MODEL` returns the full 8-byte cell (model info `+96`); the low half is
-  the name's joaat, the high half a second hash (the player's model is `0x6B13B6B43F959856`). The model natives
-  look the whole key up (`0x1400BF810`), so a 32-bit hash is not a valid model: `IS_MODEL_A_PED(0x3F959856)` is 0,
+- **Model keys are 64 bits.** `GET_ENTITY_MODEL` returns the full 8-byte cell (model info `+96`); the player's
+  model is `0x6B13B6B43F959856`. Neither half is the name's joaat: the joaat of the model name is the `u32` at
+  model info `+0x68`, right after the key (2026-11-27: 200 of 327 vehicle model infos matched a known name there,
+  none in either half of their key). The model natives look the whole key up (`0x1400BF810`), so a 32-bit hash is not a valid model: `IS_MODEL_A_PED(0x3F959856)` is 0,
   with the full key 1 (2026-11-26). The generated wrappers still type these parameters and returns as a 32-bit
   `Hash`: call model natives with the full cell (the trainer's `ModelOf` / `ModelQuery`).
 - **There is no `CREATE_VEHICLE(model, x, y, z, heading)`.** Creation is async, found by layout position:

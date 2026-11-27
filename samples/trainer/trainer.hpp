@@ -130,11 +130,14 @@ inline std::uint32_t HashName32(std::string_view s) {
 // "name" or "0xHEX" -> hash (a user list entry)
 inline std::uint64_t ParseHashEntry(const std::string& e) {
     if (e.size() > 2 && e[0] == '0' && (e[1] == 'x' || e[1] == 'X')) return std::strtoull(e.c_str() + 2, nullptr, 16);
+    // "name  0xKEY": a display name followed by the 64-bit key (names alone do not resolve in GTA VI)
+    std::size_t k = e.rfind(" 0x");
+    if (k != std::string::npos) return std::strtoull(e.c_str() + k + 3, nullptr, 16);
     return HashName32(e);
 }
 inline std::uint64_t PackXY(const Vec3& v) { return shvi_f2u(v.x) | (shvi_f2u(v.y) << 32); }
 
-// GTA VI model keys are 64 bits: the low half is the name's joaat, the high half a second hash (seen in game
+// GTA VI model keys are 64 bits and neither half is the name's joaat (model info +0x68 holds that) (seen in game
 // 2026-11-26: the player's model is 0x6B13B6B43F959856; IS_MODEL_A_PED is 1 for it and 0 for 0x3F959856). The
 // generated wrappers type models as a 32-bit Hash and drop the high half, so model natives go through these.
 using ModelKey = std::uint64_t;
@@ -378,7 +381,7 @@ public:
                                               "veh.opendoors", "veh.closedoors", "veh.breakdoors"}},
             {C::Spawn, "Story characters", {"spawn.character", "spawn.charspawn", "spawn.charlist", "spawn.charinfo", "spawn.charbring",
                                             "spawn.chardespawn"}},
-            {C::Spawn, "Models", {"spawn.model", "spawn.distance", "spawn.vehicle", "spawn.vehiclecopy", "spawn.ped", "spawn.pedcopy",
+            {C::Spawn, "Models", {"spawn.model", "spawn.distance", "spawn.vehicle", "spawn.vehiclecopy", "spawn.collectvehicles", "spawn.ped", "spawn.pedcopy",
                                   "spawn.clone", "spawn.object", "spawn.objectcopy"}},
             {C::Spawn, "Clean up", {"spawn.deletepeds", "spawn.deletevehicles"}},
             {C::Teleport, "Quick", {"teleport.tosecond", "tp.waypoint", "tp.clearwaypoint", "tp.step", "tp.forward", "tp.up", "tp.down",
@@ -649,8 +652,27 @@ private:
         b[7] = 1ull << 16;
         b[8] = 1ull << 40;
         b[10] = static_cast<std::uint64_t>(shvi_f2u(-1.0f)) << 32;
-        LogTask("vehicle creation", model,
-                A::VI_CREATE_VEHICLE_ASYNC(b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], 0, kTaskTypeToken));
+        const char* experiment = std::getenv("SHVI_EXPERIMENTAL_VEHICLE");
+        if (!experiment || std::strcmp(experiment, "1") || !shvi::api() ||
+            !SHVI_API_HAS(shvi::api(), script_object_pin) || !SHVI_API_HAS(shvi::api(), script_object_unpin) ||
+            !shvi::api()->script_object_pin || !shvi::api()->script_object_unpin) {
+            Log("trainer: vehicle experiment requires opt-in and task pin support");
+            return;
+        }
+        std::uint64_t args[13] = {};
+        std::copy(std::begin(b), std::end(b), args);
+        retry_.active = false;
+        StartSpawnWatch(SHVI_ENTITY_VEHICLE, model, p);
+        std::uint64_t task = 0;
+        const int rc = callScript_(0x48391B87u, 0xFFFFFF01u, args, 13, &task, 1);
+        LogScriptCall("experimental vehicle creation", model, rc, task);
+        watch_.task = rc == SHVI_OK ? task : 0;
+        if (!watch_.task) { EndWatch(); return; }
+        PinWatchedTask();
+        if (!watch_.pin) {
+            Log("trainer: vehicle task could not be pinned; no further attempt will be made");
+            EndWatch();
+        }
     }
     // Peds and objects are created through the game's own script wrappers in module "native"
     // (program 0x48391B87), which pass a valid Task<T> type themselves:
@@ -1330,9 +1352,12 @@ private:
         Feature& model = ChoiceList(C::Spawn, "spawn.model", "Model (shvi\\trainer_models.txt)", {}, {"(list is empty)"}, [](Ctx&, Feature&) {});
         (void)model;
         Float(C::Spawn, "spawn.distance", "Distance ahead (m)", {}, 6.0f, 1.0f, 50.0f, 1.0f, [](Ctx&, Feature&) {});
-        Action(C::Spawn, "spawn.vehicle", "Spawn vehicle: listed model", {"VI_CREATE_VEHICLE_ASYNC", "GET_ENTITY_COORDS", "GET_ENTITY_FORWARD_VECTOR", "GET_ENTITY_HEADING"},
-               [this](Ctx& c, Feature&) { SpawnVehicle(c, SelectedModel()); }).blocked = kAsyncBlocked;
-        Action(C::Spawn, "spawn.vehiclecopy", "Spawn vehicle: same model as mine or nearest",
+        const char* vehicleExperiment = std::getenv("SHVI_EXPERIMENTAL_VEHICLE");
+        const bool experimentalVehicle = vehicleExperiment && !std::strcmp(vehicleExperiment, "1");
+        { Feature& vf = Action(C::Spawn, "spawn.vehicle", "Spawn vehicle: listed model", {"VI_CREATE_VEHICLE_ASYNC", "GET_ENTITY_COORDS", "GET_ENTITY_FORWARD_VECTOR", "GET_ENTITY_HEADING"},
+               [this](Ctx& c, Feature&) { SpawnVehicle(c, SelectedModel()); });
+          vf.blocked = experimentalVehicle ? nullptr : kAsyncBlocked; vf.scriptCall = true; vf.guess = true; }
+        { Feature& vf = Action(C::Spawn, "spawn.vehiclecopy", "Spawn vehicle: same model as mine or nearest",
                {"VI_CREATE_VEHICLE_ASYNC", "GET_ENTITY_MODEL", "GET_ENTITY_COORDS", "GET_ENTITY_FORWARD_VECTOR", "GET_ENTITY_HEADING"},
                [this](Ctx& c, Feature&) {
                    Ref src = c.veh;
@@ -1342,7 +1367,10 @@ private:
                    }
                    if (Valid(src)) SpawnVehicle(c, ModelOf(src));
                    else Log("trainer: no vehicle to copy");
-               }).blocked = kAsyncBlocked;
+               });
+          vf.blocked = experimentalVehicle ? nullptr : kAsyncBlocked; vf.scriptCall = true; vf.guess = true; }
+        Action(C::Spawn, "spawn.collectvehicles", "Add nearby vehicle models to the list", {"GET_ENTITY_MODEL", "GET_ENTITY_COORDS"},
+               [this](Ctx& c, Feature&) { CollectVehicleModels(c); });
         { Feature& sf = Action(C::Spawn, "spawn.ped", "Spawn ped: listed model", {"GET_ENTITY_COORDS", "GET_ENTITY_FORWARD_VECTOR", "GET_ENTITY_HEADING"},
                [this](Ctx& c, Feature&) { SpawnPed(c, SelectedModel()); }); sf.scriptCall = true; sf.checked = kSpawnChecked; }
         { Feature& sf = Action(C::Spawn, "spawn.pedcopy", "Spawn ped: same model as nearest",
@@ -1873,7 +1901,34 @@ private:
         });
     }
 
+    // Adds the 64-bit model key of every vehicle within 150 m that is not listed yet, to the menu list
+    // and to shvi	rainer_models.txt when SetModelFile was called. Names cannot be used: they only give
+    // the low half of the key.
+    void CollectVehicleModels(const Ctx& c) {
+        Feature* m = Find("spawn.model");
+        if (models_.empty()) m->options.clear();
+        int added = 0;
+        for (Ref v : Nearby(c, SHVI_ENTITY_VEHICLE, 150.0f, false)) {
+            ModelKey key = ModelOf(v);
+            if (!key || std::find(models_.begin(), models_.end(), key) != models_.end()) continue;
+            char e[24];
+            std::snprintf(e, sizeof(e), "0x%016llX", static_cast<unsigned long long>(key));
+            models_.push_back(key);
+            m->options.emplace_back(e);
+            if (!modelFile_.empty())
+                if (std::FILE* f = std::fopen(modelFile_.c_str(), "a")) { std::fprintf(f, "%s\n", e); std::fclose(f); }
+            ++added;
+        }
+        if (m->options.empty()) m->options.emplace_back("(list is empty)");
+        if (m->i < 0 || m->i >= static_cast<int>(m->options.size())) m->i = 0;
+        char b[96];
+        std::snprintf(b, sizeof(b), "trainer: %d new vehicle model(s) listed, %zu in total", added, models_.size());
+        Log(b);
+    }
+    std::string modelFile_;
+
 public:
+    void SetModelFile(std::string path) { modelFile_ = std::move(path); }
     // Model list for the spawner: "name" (hashed) or "0xHEX" per entry. Call before BuildMenu().
     void SetModelList(const std::vector<std::string>& entries) {
         models_.clear();

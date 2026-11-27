@@ -184,6 +184,7 @@ void ScriptMain(void*) {
             if (!line.empty()) models.push_back(line);
         }
         t.SetModelList(models);
+        t.SetModelFile(shviDir + "trainer_models.txt");
     }
 
     std::vector<AutoStep> autorun = LoadAutorun(shviDir);

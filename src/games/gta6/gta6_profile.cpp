@@ -44,6 +44,7 @@
 #include "games/gta6/gta6_mode.h"
 #include "games/gta6/vi_ecs.h"
 #include "games/gta6/vi_script.h"
+#include "games/gta6/vi_vehicle_experiment.h"
 #include "games/gta6/vi_thread_context.h"
 #include "games/gta6/vi_ui_adapters.h"
 #include "core/native_table.h"
@@ -466,6 +467,121 @@ void CensusProgram(void* program) {
                      static_cast<unsigned long long>(id));
     }
     std::fflush(g_census.out);
+}
+
+// Only allocated diagnostic bytecode is written. Existing code, sizes and frame PCs stay intact.
+bool ExperimentalVehicleEnabled() {
+    const char* value = std::getenv("SHVI_EXPERIMENTAL_VEHICLE");
+    return value && std::strcmp(value, "1") == 0;
+}
+bool SehVehicleDonor(std::uintptr_t program, std::uint8_t* donor, std::uintptr_t* code) {
+    __try {
+        namespace ve = gta6::vehicle_experiment;
+        const auto count = *reinterpret_cast<const std::uint32_t*>(program + 0x2C);
+        const auto types = *reinterpret_cast<const std::uintptr_t*>(program + 0x30);
+        if (!types || count <= ve::kTaskType ||
+            *reinterpret_cast<const std::uint32_t*>(program + 0xF8) != ve::kCodeSize) return false;
+        const auto record = types + ve::kTaskType * gta6::script::type::kStride;
+        const auto base = *reinterpret_cast<const std::uintptr_t*>(record + 0x20);
+        if (!base || !ve::ValidTaskType(*reinterpret_cast<const std::uint32_t*>(record + 0x1C),
+                                      *reinterpret_cast<const std::uint32_t*>(record + 0x34),
+                                      *reinterpret_cast<const std::uint32_t*>(base + 0x1C))) return false;
+        *code = *reinterpret_cast<const std::uintptr_t*>(program + 0xE8);
+        if (!*code) return false;
+        std::memcpy(donor, reinterpret_cast<const void*>(*code + ve::kPedOffset), ve::kPedWrapper.size());
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+// Last 256 bytes of the committed read-write view holding the program's end; they and at least 4 KiB
+// before them must be zero. The program ends at the larger of its code end and its import table end.
+bool SehVehicleTail(std::uintptr_t program, std::uintptr_t code, const std::uint8_t* bytes, std::size_t n,
+                    std::uintptr_t* out) {
+    __try {
+        namespace ve = gta6::vehicle_experiment;
+        const auto imports = *reinterpret_cast<const std::uintptr_t*>(program + gta6::script::program::kImports);
+        const auto importCount = *reinterpret_cast<const std::uint32_t*>(program + gta6::script::program::kImportCount);
+        std::uintptr_t last = code + ve::kCodeSize;
+        if (imports > last && importCount < 4096) last = std::max(last, imports + importCount * 24u);
+        MEMORY_BASIC_INFORMATION memory{};
+        if (!VirtualQuery(reinterpret_cast<void*>(last), &memory, sizeof(memory)) || memory.State != MEM_COMMIT ||
+            memory.Protect != PAGE_READWRITE) return false;
+        const auto regionEnd = reinterpret_cast<std::uintptr_t>(memory.BaseAddress) + memory.RegionSize;
+        const auto stub = regionEnd - 0x100;
+        if (stub < last + 0x1000 || stub - code > UINT32_MAX) return false;
+        const auto* p = reinterpret_cast<const std::uint8_t*>(stub - 0x1000);
+        bool zero = true, ours = std::equal(bytes, bytes + n, reinterpret_cast<const std::uint8_t*>(stub));
+        for (std::size_t i = 0; i < 0x1100 && !ours; ++i) zero = zero && p[i] == 0;
+        if (!zero && !ours) return false;
+        if (!ours) std::memcpy(reinterpret_cast<void*>(stub), bytes, n);
+        *out = stub;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+bool VehicleStubOffset(std::uintptr_t program, std::uint32_t* offset) {
+    namespace ve = gta6::vehicle_experiment;
+    std::array<std::uint8_t, ve::kPedWrapper.size()> donor{};
+    std::uintptr_t code = 0;
+    if (!SehVehicleDonor(program, donor.data(), &code)) {
+        SHVI_LOG("vehicle experiment: program or task metadata validation failed");
+        return false;
+    }
+    auto bytes = ve::Build(donor.data(), donor.size());
+    if (!bytes) {
+        SHVI_LOG("vehicle experiment: donor bytecode differs from expected wrapper");
+        return false;
+    }
+    struct Stub { std::uintptr_t code; std::uint32_t offset; };
+    static std::mutex mutex;
+    static std::unordered_map<std::uintptr_t, Stub> stubs;
+    std::lock_guard lock(mutex);
+    if (auto i = stubs.find(program); i != stubs.end() && i->second.code == code) {
+        *offset = i->second.offset;
+        return true;
+    }
+    SYSTEM_INFO info{};
+    GetSystemInfo(&info);
+    const auto granularity = static_cast<std::uintptr_t>(info.dwAllocationGranularity);
+    const auto end = code + UINT32_MAX;
+    auto candidate = (code + ve::kCodeSize + granularity - 1) & ~(granularity - 1);
+    while (candidate < end && end - candidate >= info.dwPageSize) {
+        MEMORY_BASIC_INFORMATION memory{};
+        if (!VirtualQuery(reinterpret_cast<void*>(candidate), &memory, sizeof(memory))) break;
+        if (memory.State == MEM_FREE) {
+            void* stub = VirtualAlloc(reinterpret_cast<void*>(candidate), info.dwPageSize,
+                                      MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            if (stub) {
+                const auto address = reinterpret_cast<std::uintptr_t>(stub);
+                if (address < code || address - code > UINT32_MAX) {
+                    VirtualFree(stub, 0, MEM_RELEASE);
+                    return false;
+                }
+                std::memcpy(stub, bytes->data(), bytes->size());
+                DWORD old = 0;
+                if (!VirtualProtect(stub, info.dwPageSize, PAGE_READONLY, &old)) {
+                    VirtualFree(stub, 0, MEM_RELEASE);
+                    return false;
+                }
+                *offset = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(stub) - code);
+                stubs[program] = {code, *offset}; // The VM may retain the bytecode, so keep it for the process.
+                SHVI_LOG("vehicle experiment: standalone wrapper offset 0x%X, original code unchanged", *offset);
+                return true;
+            }
+        }
+        const auto next = reinterpret_cast<std::uintptr_t>(memory.BaseAddress) + memory.RegionSize;
+        if (next <= candidate || next > end) break;
+        candidate = (next + granularity - 1) & ~(granularity - 1);
+    }
+    // Emulated guest memory reserves the whole window, so nothing is MEM_FREE. Fall back to the zero
+    // tail of the committed view that ends the program (after its import table), far from its last byte.
+    std::uintptr_t tail = 0;
+    if (!SehVehicleTail(program, code, bytes->data(), bytes->size(), &tail)) {
+        SHVI_LOG("vehicle experiment: no free page near the code and no usable zero tail");
+        return false;
+    }
+    *offset = static_cast<std::uint32_t>(tail - code);  // not cached: re-checked on every call
+    SHVI_LOG("vehicle experiment: wrapper in program tail at %p, offset 0x%X, original code unchanged",
+             reinterpret_cast<void*>(tail), *offset);
+    return true;
 }
 
 // Linked programs by name hash, for ABI 1.6 script_function_call. Programs stay loaded for the session
@@ -1150,6 +1266,17 @@ public:
         if (!prog) return SHVI_E_NOT_READY;
         ProgramInfo pi{};
         if (!ReadProgram(prog, &pi) || !pi.valid || pi.name != program) return SHVI_E_NOT_READY;
+        if (offset == gta6::vehicle_experiment::kSentinel) {
+            SHVI_LOG("vehicle experiment: gate enabled=%d build=%u program=%08X argc=%u retc=%u",
+                     ExperimentalVehicleEnabled(), build_, program, argc, retc);
+            if (!ExperimentalVehicleEnabled() || build_ != 1794606036u ||
+                program != gta6::vehicle_experiment::kProgram || argc != 13 || retc != 1 ||
+                !VehicleStubOffset(prog, &offset)) {
+                SHVI_LOG("vehicle experiment: validation or allocation refused; no native was called");
+                return SHVI_E_UNSUPPORTED;
+            }
+            SHVI_LOG("vehicle experiment: calling standalone VM wrapper, 13 arguments; engine acceptance unverified");
+        }
         ScriptFnRef ref{offset, 0, prog};
         static std::atomic<int> logged{0};
         if (logged.fetch_add(1) < 16)

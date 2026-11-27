@@ -16,6 +16,7 @@
 #include "core/pe.h"
 #include "shvi/shvi.hpp"
 #include "games/gta6/vi_script.h"
+#include "games/gta6/vi_vehicle_experiment.h"
 #include "core/game_ready.h"
 #include "games/gta6/vi_ecs.h"
 #include "games/gta6/vi_thread_context.h"
@@ -1903,6 +1904,36 @@ TEST(victory_title_info_rejects_bad) {
     VictoryTitleInfo bigger = ok;
     bigger.struct_size = 48;  // a newer VIctory with more fields is fine
     CHECK(ValidateTitleInfo(&bigger) == SHVI_OK);
+}
+
+TEST(experimental_vehicle_wrapper_uses_closed_type_and_preserves_call_abi) {
+    namespace ve = shvi::gta6::vehicle_experiment;
+    auto built = ve::Build(ve::kPedWrapper.data(), ve::kPedWrapper.size());
+    CHECK(built.has_value());
+    if (!built) return;
+    auto token = shvi::gta6::script::DecodeAt(built->data(), built->size(), 19, true,
+                                            shvi::gta6::script::kXboxKeys, 0x3315);
+    auto call = shvi::gta6::script::DecodeAt(built->data(), built->size(), 25, true,
+                                           shvi::gta6::script::kXboxKeys, 0x3315);
+    CHECK(token && token->caseId == 47 && token->a == 0xAFA);
+    CHECK(call && call->caseId == 139 && (call->a & 0xFFFFFFFFu) == 0x4A80260u);
+    CHECK(call && ((call->a >> 32) & 0xFF) == 14 && ((call->a >> 40) & 0xFF) == 1);
+    CHECK(std::equal(built->begin(), built->begin() + 19, ve::kPedWrapper.begin()));
+    CHECK((*built)[33] == ve::kPedWrapper[33] && (*built)[34] == ve::kPedWrapper[34]);
+}
+TEST(experimental_vehicle_wrapper_rejects_other_donors) {
+    namespace ve = shvi::gta6::vehicle_experiment;
+    CHECK(!ve::Build(nullptr, ve::kPedWrapper.size()));
+    CHECK(!ve::Build(ve::kPedWrapper.data(), ve::kPedWrapper.size() - 1));
+    auto changed = ve::kPedWrapper;
+    changed[7] ^= 1;
+    CHECK(!ve::Build(changed.data(), changed.size()));
+}
+TEST(experimental_vehicle_task_keeps_generic_token_distinct_from_base_class) {
+    namespace ve = shvi::gta6::vehicle_experiment;
+    CHECK(ve::ValidTaskType(0xAFAu, 0x8000002Fu, 0x8000002Eu));
+    CHECK(!ve::ValidTaskType(0xAFAu, 0x8000002Eu, 0x8000002Fu));
+    CHECK(!ve::ValidTaskType(0xAFBu, 0x8000002Fu, 0x8000002Eu));
 }
 
 int main() {
