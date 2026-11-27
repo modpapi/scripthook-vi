@@ -360,6 +360,9 @@ void TestAsyncFeaturesAreBlocked() {
     fx.t.SetModelList({"# comment", "0x1234ABCD", "adder"});
     CHECK(fx.t.Find("spawn.model")->options.size() == 2);
     CHECK(trainer::ParseHashEntry("adder") == 0xB779A091u);  // joaat("adder"), the public GTA V value
+    // "name  0xKEY": the name is only shown, the 64-bit key is used
+    CHECK(trainer::ParseHashEntry("sultan  0x17E47FD641C94862") == 0x17E47FD641C94862ull);
+    CHECK(trainer::ParseHashEntry("0x65A46D35B8A9CFAD") == 0x65A46D35B8A9CFADull);
 }
 
 void TestSpawnThroughScriptWrappers() {
@@ -406,6 +409,54 @@ void TestSpawnThroughScriptWrappers() {
     CHECK(Count("VI_CREATE_PED_ASYNC") == 0 && Count("VI_CREATE_OBJECT_ASYNC") == 0);  // never the natives directly
 }
 
+void VehicleExperimentEnv(const char* value) {
+#ifdef _WIN32
+    _putenv_s("SHVI_EXPERIMENTAL_VEHICLE", value);
+#else
+    if (*value) setenv("SHVI_EXPERIMENTAL_VEHICLE", value, 1);
+    else unsetenv("SHVI_EXPERIMENTAL_VEHICLE");
+#endif
+}
+void TestExperimentalVehicleUsesScriptAndPinOnly() {
+    const char* saved = std::getenv("SHVI_EXPERIMENTAL_VEHICLE");
+    const std::string previous = saved ? saved : "";
+    VehicleExperimentEnv("");
+    { Fixture off; CHECK(off.t.Find("spawn.vehicle")->blocked); CHECK(!off.t.Activate("spawn.vehicle")); }
+    VehicleExperimentEnv("1");
+    Fixture fx;
+    static int calls = 0, pins = 0;
+    static std::vector<std::uint64_t> args;
+    calls = pins = 0; args.clear();
+    fx.t.SetModelList({"0x123456789ABCDEF0"});
+    fx.t.SetScriptCall([] { return true; }, [](std::uint32_t prog, std::uint32_t off,
+                                             const std::uint64_t* a, std::uint32_t n,
+                                             std::uint64_t* ret, std::uint32_t retc) {
+        CHECK(prog == 0x48391B87u && off == 0xFFFFFF01u && retc == 1);
+        args.assign(a, a + n); ++calls; *ret = 0x1234; return SHVI_OK;
+    });
+    fx.t.SetPin([](std::uint64_t task, std::uint64_t* pin) {
+        CHECK(task == 0x1234); ++pins; *pin = 7; return SHVI_OK;
+    }, [](std::uint64_t) { return SHVI_OK; });
+    fx.t.Refresh();
+    CHECK(!fx.t.Find("spawn.vehicle")->blocked && fx.t.Find("spawn.vehicle")->experimental);
+    CHECK(!fx.t.Find("spawn.vehiclecopy")->blocked && fx.t.Find("spawn.vehiclecopy")->experimental);
+    CHECK(fx.t.Find("weapon.give")->blocked && fx.t.Find("weapon.giveall")->blocked);
+    fx.api.script_object_pin = nullptr;
+    fx.api.script_object_unpin = nullptr;
+    CHECK(fx.t.Activate("spawn.vehicle")); // No pin API: refuse before script call.
+    CHECK(calls == 0 && pins == 0);
+    fx.api.script_object_pin = [](std::uint64_t, std::uint64_t*) { return SHVI_OK; };
+    fx.api.script_object_unpin = [](std::uint64_t) { return SHVI_OK; };
+    CHECK(fx.t.Activate("spawn.vehicle"));
+    CHECK(calls == 1 && pins == 1 && args.size() == 13);
+    CHECK(args.size() == 13 && args[0] == 0x123456789ABCDEF0ull && args[12] == 0);
+    CHECK(Count("VI_CREATE_VEHICLE_ASYNC") == 0);
+    VehicleExperimentEnv("");
+    CHECK(fx.t.Activate("spawn.vehicle")); // Removing opt-in also prevents an already registered action.
+    CHECK(calls == 1);
+    VehicleExperimentEnv(previous.c_str());
+}
+
 void TestStatusLine() {
     Fixture fx;
     g_results[H("GET_ENTITY_COORDS")] = {PackXY(1.5f, 2.5f), F(3.5f)};
@@ -435,6 +486,7 @@ int main() {
     TestSetWantedAndVitals();
     TestAsyncFeaturesAreBlocked();
     TestSpawnThroughScriptWrappers();
+    TestExperimentalVehicleUsesScriptAndPinOnly();
     std::printf("trainer tests: %d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }
