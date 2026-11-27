@@ -218,8 +218,8 @@ the ped once the request is ready, called directly.
    `script_object_pin` / `script_object_unpin`**, and the trainer pins each creation task until its result is
    read. (Run 58 had rewritten the top byte of a table-0 slot: that byte is a count, not a type, so it changed
    nothing.)
-2. *The model was truncated.* GTA VI model keys are **64 bits** (the player's is `0x6B13B6B43F959856`; the low
-   half is the name's joaat). The generated wrappers type models as a 32-bit `Hash`, so every model the
+2. *The model was truncated.* GTA VI model keys are **64 bits** (the player's is `0x6B13B6B43F959856`; neither
+   half is the name's joaat, which the model info keeps at `+0x68`). The generated wrappers type models as a 32-bit `Hash`, so every model the
    trainer passed had lost its high half. With the 32-bit key the creation fails its model check
    (`0x1400BF810`, type at `+153 & 7` must be 6) and `0x14115B2F0` returns an already-completed task (status 5)
    with no entity: exactly the "task never changes" of runs 18-22. The trainer now reads models with the full
@@ -233,10 +233,28 @@ sees the task complete at once with no entity and retries on later ticks. The co
 calls ("ped creation gates", "owner check"). The hook now runs `script_function_call` under heap 2 by default
 on this build (`shvi\script_heap.txt` = `auto`, `0`-`2` or `off` overrides).
 
-Still blocked: **vehicle spawning** and **single-weapon give**. Both call their async native directly with a
-built-in task type, which crashed in runs 8 and 9; they need the game's own script wrappers in module `native`
-(as peds and objects use), not yet located. `settings.runblocked on` in an autorun or command file re-enables
-them for a test run.
+Still blocked: **single-weapon give**. It calls its async native directly with a built-in task type, which
+crashed in runs 8 and 9; it needs the game's own script wrapper in module `native` (as peds and objects use),
+not yet located. `settings.runblocked on` in an autorun or command file re-enables it for a test run.
+
+**Vehicle spawning (opt-in, `SHVI_EXPERIMENTAL_VEHICLE=1`).** No script wrapper for `VI_CREATE_VEHICLE_ASYNC`
+(`0x4A80260`, 14 cells) was found, so the core builds one: it copies the ped wrapper of program `0x48391B87`
+(`kPedOffset 0x18247`, 35 bytes, checked byte for byte), re-encodes two operands (the closed task type
+`0xAFA` and the vehicle native) and calls it through `script_function_call` with the sentinel offset
+`0xFFFFFF01`. The game's code is not changed. The wrapper goes in a page allocated within 4 GiB after the code;
+under VIctory the guest window is fully reserved (no `MEM_FREE` page), so it falls back to the zero tail of the
+committed read-write view that ends the program (after its import table, at least 4 KiB from its last byte),
+checked again on every call. Only build `1794606036`, program `0x48391B87`, 13 arguments and 1 return are
+accepted; anything else returns `SHVI_E_UNSUPPORTED` without calling a native. Confirmed in game (2026-11-27):
+"Spawn vehicle" and "Spawn a copy of the nearest vehicle" create the vehicle at the requested point.
+
+**Vehicle model list.** "Add nearby vehicle models to the list" (Spawn page) adds the key of every vehicle
+within 150 m that is not listed yet, and appends it to `shvi\trainer_models.txt`. Model list lines may be
+`name`, `0x` + 16 hex digits, or a display name followed by the key (`sultan  0x…`); only the key is used,
+since names do not resolve to 64-bit keys. Names were recovered for 197 of the 327 vehicle keys of the
+game's vehicle model table by matching the `u32` at model info `+0x68` against the joaat of strings from game
+memory and from the decompressed `data.rpf` / `common.rpf` streams. The list is
+`samples/trainer/trainer_models_vehicles.txt`: copy it to `shvi\trainer_models.txt` to use it.
 
 What is known and reusable: the call path works; the ped native's cells are model, position (2), heading,
 three flags, one unused cell, a 12-byte block (2 cells), a flag, a pointer, an int; a finished task holds
@@ -270,9 +288,9 @@ give stays blocked (§5).
 |---|---|
 | Vehicle colours, mods, plates, extras | Looked for: the natives sorted where `SetVehicleColour…` would be all take `(Vehicle, BOOL)`. No colour or mod setter found by signature anywhere in the vehicle code regions |
 | Armour as its own value | Not a separate native. Either one of the six vitals or not present in this build |
-| Spawning and single-weapon give | Blocked (§5). The script-function call path works; creation needs a thread context in which the engine's pooled allocation works |
+| Single-weapon give | Blocked (§5). The script-function call path works; it needs the game's own script wrapper. Vehicle spawning works behind `SHVI_EXPERIMENTAL_VEHICLE=1` (§5) |
 | Explosive / fire ammo, super jump, abilities, cash, HUD toggles | No native identified |
-| Display names for weapons and models | Only hashes that scripts pass as literals are known |
+| Display names for weapons and models | Only hashes that scripts pass as literals are known. Vehicle model names (internal, not localized): 197 of 327 recovered (§5) |
 
 ## 7. Assumptions to check on first run
 
