@@ -182,7 +182,7 @@ Legend: ✅ done and verified in game · 🧪 done, unit-tested, not yet confirm
 | Part | State | Notes |
 |---|---|---|
 | Native census of the exe | ✅ | 6,829 handlers, matched against an independent IDA census with nothing unexplained |
-| Typed NativeDB (`natives.json`, alloc8or layout) | ✅ | All 6,829 typed; 2,034 named with a confidence level; names checked by code-layout order |
+| Typed NativeDB (`natives.json`, alloc8or layout) | ✅ | All 6,829 typed; 2,053 named with a confidence level; names checked by code-layout order |
 | Generated C++ wrappers `natives_full.hpp` | ✅ | 6,823 wrappers, `shvi::nativedb::<NS>::<NAME>` |
 | Sample trainer (`samples/trainer`) | ✅ / 🚧 | 181 features in 9 categories, sectioned menu with status badges; 176 usable, 44 still experimental; confirmed features are marked in the code with what the read-back showed |
 | Sample menu (`samples/menu_demo`), C sample (`samples/hello_engine`) | ✅ | `hello_engine` calls the game's string hash in game and matches the SDK |
@@ -199,7 +199,7 @@ Legend: ✅ done and verified in game · 🧪 done, unit-tested, not yet confirm
 - [x] Async natives (`Task<T>`): spawn peds and objects through the game's own script wrappers, task pinned (ABI 1.7)
 - [ ] Vehicle spawning and single-item give: locate their script wrappers
 - [ ] Confirm the remaining trainer features by read-back (wanted level, abilities, vitals, weather overrides)
-- [ ] Name more natives (behaviour checks; the 2,850 ranked candidates)
+- [ ] Name more natives (behaviour checks; the 2,813 ranked candidates)
 
 ### Phase B: make the per-build part generic
 
@@ -375,12 +375,16 @@ RVA, argument and return cell counts, name confidence and the evidence behind ea
 |---|---|
 | Natives | 6,829 (every handler in the 1.0.2.1 exe) |
 | Typed (params, return type, cell counts) | 6,829 |
-| Named | 2,034, each with a confidence level |
-| Unnamed with ranked candidate names | 2,850 |
+| Named | 2,053, each with a confidence level |
+| Unnamed with ranked candidate names | 2,813 |
 
 Every name carries a confidence (`behaviour-checked`, `corroborated`, `guide`, `inferred-*`, ...).
 The trainer only enables features whose natives meet a confidence bar. Details and method:
 [docs/NATIVEDB.md](docs/NATIVEDB.md).
+
+The data in [`nativedb/db/`](nativedb/db/) is licensed under [CC BY 4.0](nativedb/db/LICENSE). The licence
+does not cover the code or the rest of the repository; see [nativedb/README.md](nativedb/README.md) for
+attribution and the origin of the names.
 
 ## What is (and is not) in this repository
 
